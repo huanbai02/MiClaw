@@ -26,6 +26,7 @@ def office(tmp_path, monkeypatch):
     office_dir.mkdir(parents=True)
     monkeypatch.setattr(sandbox_tools, "OFFICE_DIR", str(office_dir))
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", evaluate_permission)
+    monkeypatch.setattr(sandbox_tools, "_permission_audit_logger", lambda *args, **kwargs: None)
     return office_dir
 
 
@@ -235,7 +236,7 @@ def test_permission_checks_do_not_bypass_path_validation_for_write(office, monke
     assert not (office.parent / "outside.txt").exists()
 
 
-def test_shell_permission_request_uses_medium_risk_and_command_preview(office, monkeypatch):
+def test_shell_permission_request_uses_medium_risk_and_safe_command_metadata(office, monkeypatch):
     captured = {}
 
     def capture_and_deny(request):
@@ -250,7 +251,11 @@ def test_shell_permission_request_uses_medium_risk_and_command_preview(office, m
     assert "Permission denied: captured" in result
     assert request.operation == "execute"
     assert request.target == "office"
-    assert request.arguments == {"command_preview": "echo hello"}
+    assert request.arguments == {
+        "cwd_scope": "office",
+        "shell_command_present": True,
+        "command_length": len("echo hello"),
+    }
     assert request.risk_level is RiskLevel.MEDIUM
 
 

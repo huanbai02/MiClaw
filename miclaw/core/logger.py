@@ -4,6 +4,8 @@ import threading
 import queue
 import atexit
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
 
 # 内存队列 + 守护线程
 class JSONLEventLogger:
@@ -70,3 +72,89 @@ class JSONLEventLogger:
         self.log_queue.join()
 
 audit_logger = JSONLEventLogger()
+
+_SAFE_METADATA_KEYS = {
+    "tool_name",
+    "operation",
+    "target",
+    "permission_decision",
+    "error_type",
+    "cwd_scope",
+    "exit_code",
+    "timeout",
+    "shell_command_present",
+    "command_length",
+}
+
+
+def build_permission_decision_event(
+    request,
+    result,
+    *,
+    tool_name: str | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    """构建 JSON-friendly 的 permission_decision audit event。"""
+    safe_metadata = _safe_permission_metadata(metadata or {})
+
+    decision = _json_safe_value(getattr(result, "decision", "deny"))
+    event = {
+        "event_type": "permission_decision",
+        "tool_name": tool_name or safe_metadata.get("tool_name") or "unknown",
+        "capability": _json_safe_value(getattr(request, "capability", "unknown")),
+        "operation": str(getattr(request, "operation", "") or ""),
+        "target": str(getattr(request, "target", "") or ""),
+        "decision": decision,
+        "risk_level": _json_safe_value(getattr(result, "risk_level", getattr(request, "risk_level", "low"))),
+        "reason": str(getattr(result, "reason", "") or ""),
+        "requires_confirmation": bool(getattr(result, "requires_confirmation", False)),
+        "error_type": _permission_error_type(decision),
+        "metadata": safe_metadata,
+    }
+    return event
+
+
+def log_permission_decision(
+    request,
+    result,
+    *,
+    tool_name: str | None = None,
+    metadata: dict | None = None,
+    thread_id: str = "system",
+) -> None:
+    """通过现有 JSONL logger 写入 permission_decision audit event。"""
+    try:
+        event = build_permission_decision_event(request, result, tool_name=tool_name, metadata=metadata)
+        audit_logger.log_event(thread_id, event["event_type"], **event)
+    except Exception as e:
+        print(f"[Logger Error] permission decision audit failed: {e}")
+
+
+def _permission_error_type(decision: str) -> str:
+    if decision == "deny":
+        return "permission_denied"
+    if decision == "ask":
+        return "permission_required"
+    return ""
+
+
+def _safe_permission_metadata(metadata: dict) -> dict:
+    safe = {}
+    for key, value in dict(metadata).items():
+        key_text = str(key)
+        if key_text not in _SAFE_METADATA_KEYS:
+            continue
+        safe[key_text] = _json_safe_value(value)
+    return safe
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)

@@ -13,6 +13,7 @@ from .result import (
     tool_success,
 )
 from ..config import OFFICE_DIR
+from ..logger import log_permission_decision
 from ..permissions import (
     PermissionCapability,
     PermissionDecision,
@@ -24,6 +25,7 @@ from ..permissions import (
 
 SYS_OS = platform.system()
 _permission_evaluator = evaluate_permission
+_permission_audit_logger = log_permission_decision
 
 
 def _get_office_root() -> Path:
@@ -133,6 +135,12 @@ def _require_allowed_permission(request: PermissionRequest, metadata: dict) -> T
     """仅 ALLOW 可继续执行；DENY/ASK 都返回阻断 ToolResult。"""
     result = _evaluate_office_permission(request)
     metadata["permission_decision"] = result.decision.value
+    _permission_audit_logger(
+        request,
+        result,
+        tool_name=str(metadata.get("tool_name") or "unknown"),
+        metadata=metadata,
+    )
     if result.decision is PermissionDecision.ALLOW:
         return None
     return tool_permission_blocked(
@@ -367,14 +375,19 @@ def execute_office_shell(command: str) -> str:
                 return _format_result(tool_error("shell_error", message, content=message, metadata=metadata))
 
         office_root = _get_office_root()
-        metadata = _tool_metadata("execute_office_shell", "execute", "office", cwd=str(office_root))
+        safe_shell_metadata = {
+            "cwd_scope": "office",
+            "shell_command_present": bool(command),
+            "command_length": len(command or ""),
+        }
+        metadata = _tool_metadata("execute_office_shell", "execute", "office", **safe_shell_metadata)
         _ensure_no_symlink_escape_in_office()
         block_result = _require_allowed_permission(
             PermissionRequest(
                 capability=PermissionCapability.SHELL_EXEC,
                 operation="execute",
                 target="office",
-                arguments={"command_preview": command[:200]},
+                arguments=safe_shell_metadata,
                 risk_level=RiskLevel.MEDIUM,
                 reason="Execute shell command in office workspace",
             ),
