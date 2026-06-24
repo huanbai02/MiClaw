@@ -6,8 +6,17 @@ from pathlib import Path, PureWindowsPath
 
 from .base import miclaw_tool
 from ..config import OFFICE_DIR
+from ..permissions import (
+    PermissionCapability,
+    PermissionDecision,
+    PermissionRequest,
+    PermissionResult,
+    RiskLevel,
+    evaluate_permission,
+)
 
 SYS_OS = platform.system()
+_permission_evaluator = evaluate_permission
 
 
 def _get_office_root() -> Path:
@@ -83,6 +92,32 @@ def _ensure_no_symlink_escape_in_office() -> None:
         _ensure_path_inside_base(target, base)
 
 
+def _relative_office_target(path: Path) -> str:
+    """生成用于 permission request 的安全 office 相对 target。"""
+    relative_path = path.relative_to(_get_office_root())
+    return "." if not relative_path.parts else relative_path.as_posix()
+
+
+def _permission_block_message(result: PermissionResult) -> str:
+    """把 DENY/ASK permission result 转换为用户可见阻断消息。"""
+    if result.decision is PermissionDecision.ASK:
+        return f"Permission required: {result.reason}"
+    return f"Permission denied: {result.reason}"
+
+
+def _evaluate_office_permission(request: PermissionRequest) -> PermissionResult:
+    """调用当前 permission evaluator，便于测试用 monkeypatch 注入策略。"""
+    return _permission_evaluator(request)
+
+
+def _require_allowed_permission(request: PermissionRequest) -> str | None:
+    """仅 ALLOW 可继续执行；DENY/ASK 都返回阻断消息。"""
+    result = _evaluate_office_permission(request)
+    if result.decision is PermissionDecision.ALLOW:
+        return None
+    return _permission_block_message(result)
+
+
 @miclaw_tool
 def list_office_files(sub_dir: str = "") -> str:
     """
@@ -91,6 +126,18 @@ def list_office_files(sub_dir: str = "") -> str:
     """
     try:
         target_dir = _resolve_existing_office_path(sub_dir)
+        block_message = _require_allowed_permission(
+            PermissionRequest(
+                capability=PermissionCapability.FILE_READ,
+                operation="list",
+                target=_relative_office_target(target_dir),
+                risk_level=RiskLevel.LOW,
+                reason="List files in office workspace",
+            )
+        )
+        if block_message:
+            return block_message
+
         if not target_dir.exists():
             return f"目录不存在：{sub_dir}"
 
@@ -118,6 +165,18 @@ def read_office_file(filepath: str) -> str:
     """
     try:
         target_path = _resolve_existing_office_path(filepath)
+        block_message = _require_allowed_permission(
+            PermissionRequest(
+                capability=PermissionCapability.FILE_READ,
+                operation="read",
+                target=_relative_office_target(target_path),
+                risk_level=RiskLevel.LOW,
+                reason="Read file from office workspace",
+            )
+        )
+        if block_message:
+            return block_message
+
         if not target_path.exists():
             return f"文件不存在：{filepath}"
 
@@ -150,6 +209,17 @@ def write_office_file(filepath: str, content: str, mode: str = "w") -> str:
     """
     try:
         target_path = _resolve_new_office_path(filepath)
+        block_message = _require_allowed_permission(
+            PermissionRequest(
+                capability=PermissionCapability.FILE_WRITE,
+                operation="write",
+                target=_relative_office_target(target_path),
+                risk_level=RiskLevel.LOW,
+                reason="Write file in office workspace",
+            )
+        )
+        if block_message:
+            return block_message
 
         # 严格校验传入的 mode
         if mode not in ["w", "a"]:
@@ -197,6 +267,18 @@ def execute_office_shell(command: str) -> str:
 
         office_root = _get_office_root()
         _ensure_no_symlink_escape_in_office()
+        block_message = _require_allowed_permission(
+            PermissionRequest(
+                capability=PermissionCapability.SHELL_EXEC,
+                operation="execute",
+                target="office",
+                arguments={"command_preview": command[:200]},
+                risk_level=RiskLevel.MEDIUM,
+                reason="Execute shell command in office workspace",
+            )
+        )
+        if block_message:
+            return block_message
 
         result = subprocess.run(
             command,
