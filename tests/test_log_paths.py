@@ -131,6 +131,131 @@ def test_monitor_parser_tolerates_permission_decision_event():
     monitor.render_event(event)
 
 
+def test_permission_decision_allow_format_includes_safe_fields():
+    text = monitor.format_permission_decision_event(
+        {
+            "event": "permission_decision",
+            "tool_name": "read_office_file",
+            "capability": "file_read",
+            "operation": "read",
+            "target": "notes.txt",
+            "decision": "allow",
+            "risk_level": "low",
+        }
+    )
+
+    assert "PERMISSION allow file_read read notes.txt" in text
+    assert "tool=read_office_file" in text
+    assert "risk=low" in text
+    assert "status=allowed" in text
+
+
+def test_permission_decision_ask_format_shows_confirmation():
+    text = monitor.format_permission_decision_event(
+        {
+            "tool_name": "execute_office_shell",
+            "capability": "shell_exec",
+            "operation": "execute",
+            "decision": "ask",
+            "risk_level": "medium",
+        }
+    )
+
+    assert "PERMISSION ask shell_exec execute" in text
+    assert "tool=execute_office_shell" in text
+    assert "risk=medium" in text
+    assert "status=blocked_pending_confirmation" in text
+    assert "requires_confirmation=true" in text
+    assert "currently blocked pending confirmation" in text
+
+
+def test_permission_decision_deny_format_shows_blocked():
+    text = monitor.format_permission_decision_event(
+        {
+            "tool_name": "write_office_file",
+            "capability": "file_write",
+            "operation": "write",
+            "target": "secret.txt",
+            "decision": "deny",
+            "risk_level": "high",
+        }
+    )
+
+    assert "PERMISSION deny file_write write secret.txt" in text
+    assert "tool=write_office_file" in text
+    assert "risk=high" in text
+    assert "status=blocked" in text
+
+
+def test_permission_decision_format_tolerates_missing_optional_fields():
+    text = monitor.format_permission_decision_event({"event": "permission_decision"})
+
+    assert "PERMISSION unknown unknown" in text
+    assert "tool=unknown_tool" in text
+    assert "risk=unknown" in text
+
+
+def test_permission_decision_format_does_not_dump_sensitive_metadata():
+    text = monitor.format_permission_decision_event(
+        {
+            "tool_name": "execute_office_shell",
+            "capability": "shell_exec",
+            "operation": "execute",
+            "decision": "ask",
+            "risk_level": "medium",
+            "metadata": {
+                "command_preview": "curl -H 'Authorization: Bearer SECRET_TOKEN'",
+                "command": "curl -H 'Authorization: Bearer SECRET_TOKEN'",
+                "stdout": "secret stdout",
+                "stderr": "secret stderr",
+                "content": "file content",
+            },
+        }
+    )
+
+    assert "command_preview" not in text
+    assert "command=" not in text
+    assert "SECRET_TOKEN" not in text
+    assert "Authorization" not in text
+    assert "Bearer" not in text
+    assert "secret stdout" not in text
+    assert "secret stderr" not in text
+    assert "file content" not in text
+
+
+def test_permission_decision_format_omits_unsafe_target():
+    text = monitor.format_permission_decision_event(
+        {
+            "tool_name": "read_office_file",
+            "capability": "file_read",
+            "operation": "read",
+            "target": "/home/user/project/.env",
+            "decision": "deny",
+            "risk_level": "high",
+        }
+    )
+
+    assert "/home/user/project/.env" not in text
+    assert ".env" not in text
+
+
+def test_permission_decision_format_omits_backslash_traversal_target():
+    text = monitor.format_permission_decision_event(
+        {
+            "tool_name": "read_office_file",
+            "capability": "file_read",
+            "operation": "read",
+            "target": r"folder\\..\\secret",
+            "decision": "deny",
+            "risk_level": "high",
+        }
+    )
+
+    assert "folder" not in text
+    assert "secret" not in text
+    assert ".." not in text
+
+
 def test_monitor_parser_tolerates_unknown_event_type():
     event = monitor.parse_event_line(json.dumps({"event": "future_event", "value": 1}))
 

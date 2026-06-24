@@ -1,7 +1,7 @@
 import time
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from rich.console import Console
 from rich.theme import Theme
 from rich.panel import Panel
@@ -20,6 +20,7 @@ miclaw_theme = Theme({
     "llm_input": "dim white",
     "tool_call": "bold yellow",
     "tool_result": "bold green",
+    "permission_pending": "bold color(214)",
     "ai_message": "bold bright_magenta",
     "timestamp": "dim white"
 })
@@ -127,6 +128,120 @@ def _format_timestamp(data: dict) -> str:
         return ts_str.split("T")[-1][:8] if ts_str else "--:--:--"
 
 
+def _safe_permission_target(target: object) -> str:
+    """只显示明显安全的 office-relative permission target。"""
+    target_text = str(target or "").strip()
+    if not target_text:
+        return ""
+    path = Path(target_text)
+    if path.is_absolute() or PureWindowsPath(target_text).drive:
+        return ""
+    if target_text.startswith(("/", "\\")):
+        return ""
+    if ".." in path.parts or ".." in PureWindowsPath(target_text).parts:
+        return ""
+    return target_text
+
+
+def format_permission_decision_event(event: dict) -> str:
+    """生成不包含 raw metadata 的 permission_decision 摘要。"""
+    decision = str(event.get("decision") or "unknown").lower()
+    capability = str(event.get("capability") or "unknown")
+    operation = str(event.get("operation") or "").strip()
+    tool_name = str(event.get("tool_name") or "unknown_tool")
+    risk_level = str(event.get("risk_level") or "unknown")
+    target = _safe_permission_target(event.get("target"))
+    requires_confirmation = bool(event.get("requires_confirmation")) or decision == "ask"
+
+    status_by_decision = {
+        "allow": "allowed",
+        "ask": "blocked_pending_confirmation",
+        "deny": "blocked",
+    }
+    status = status_by_decision.get(decision, "unknown")
+
+    action_parts = ["PERMISSION", decision, capability]
+    if operation:
+        action_parts.append(operation)
+    if target:
+        action_parts.append(target)
+
+    detail_parts = [f"tool={tool_name}", f"risk={risk_level}", f"status={status}"]
+    if requires_confirmation:
+        detail_parts.append("requires_confirmation=true")
+    if decision == "ask":
+        detail_parts.append("currently blocked pending confirmation")
+
+    return f"{' '.join(action_parts)} [{' '.join(detail_parts)}]"
+
+
+def get_permission_decision_style(decision: object) -> str:
+    """为 permission decision 选择明确语义样式，ASK 不走 generic warning。"""
+    decision_text = str(decision or "").lower()
+    if decision_text == "allow":
+        return "tool_result"
+    if decision_text == "deny":
+        return "error"
+    if decision_text == "ask":
+        return "permission_pending"
+    return "warning"
+
+
+def _is_sensitive_arg_key(key: object) -> bool:
+    """判断 tool arg key 是否只能显示 presence/length。"""
+    key_text = str(key or "").lower()
+    sensitive_markers = (
+        "command",
+        "content",
+        "token",
+        "api_key",
+        "apikey",
+        "password",
+        "secret",
+        "authorization",
+        "bearer",
+        "key",
+    )
+    return any(marker in key_text for marker in sensitive_markers)
+
+
+def format_tool_args_summary(args: object) -> str:
+    """生成 tool_call 参数摘要，不显示 raw value。"""
+    if not isinstance(args, dict):
+        return "args=unavailable"
+
+    summary_parts = []
+    sensitive_seen = False
+    for key, value in args.items():
+        key_text = str(key)
+        key_lower = key_text.lower()
+        value_text = "" if value is None else str(value)
+
+        if "command" in key_lower:
+            summary_parts.append(f"{key_text}_present=true")
+            summary_parts.append(f"{key_text}_length={len(value_text)}")
+        elif "content" in key_lower:
+            summary_parts.append(f"{key_text}_present=true")
+            summary_parts.append(f"{key_text}_length={len(value_text)}")
+        elif key_lower == "input" or "input" in key_lower:
+            summary_parts.append(f"{key_text}_present=true")
+            summary_parts.append(f"{key_text}_length={len(value_text)}")
+        elif _is_sensitive_arg_key(key_text):
+            sensitive_seen = True
+        else:
+            summary_parts.append(key_text)
+
+    if sensitive_seen:
+        summary_parts.append("sensitive_value_present=true")
+    return " ".join(summary_parts) if summary_parts else "none"
+
+
+def format_tool_call_event(event: dict) -> str:
+    """生成不泄漏 raw args 的 tool_call 摘要。"""
+    tool_name = str(event.get("tool") or "unknown")
+    return f"TOOL CALL {tool_name} [args={format_tool_args_summary(event.get('args', {}))}]"
+
+
 def render_event(line: str | dict):
     """解析并渲染监控日志；未知 event 使用通用 fallback。"""
     data = parse_event_line(line) if isinstance(line, str) else line
@@ -143,8 +258,10 @@ def render_event(line: str | dict):
 
     elif event == "tool_call":
         tool_name = data.get("tool", "unknown")
-        args_str = json.dumps(data.get("args", {}), ensure_ascii=False, indent=2)
-        content = f"[bold white] ● 使用工具: [/bold white][bold color(141)]{tool_name}[/bold color(141)]\n传入参数:\n{args_str}"
+        content = (
+            f"[bold white] ● 使用工具: [/bold white][bold color(141)]{tool_name}[/bold color(141)]\n"
+            f"{format_tool_call_event(data)}"
+        )
         console.print(Panel(content, title=f"✦ 意图决断 [ {ts} ]", title_align="left", border_style="color(141)", width=60))
 
     elif event == "tool_result":
@@ -159,13 +276,9 @@ def render_event(line: str | dict):
         console.print(f"{prefix}[warning]✦ 底层状态机：{action}[/warning]")
 
     elif event == "permission_decision":
-        tool_name = data.get("tool_name", "unknown")
-        capability = data.get("capability", "unknown")
-        decision = data.get("decision", "unknown")
-        risk_level = data.get("risk_level", "unknown")
-        console.print(
-            f"{prefix}[warning]✦ Permission: {tool_name} {capability} -> {decision} ({risk_level})[/warning]"
-        )
+        decision = str(data.get("decision") or "").lower()
+        style = get_permission_decision_style(decision)
+        console.print(f"{prefix}[{style}]✦ {format_permission_decision_event(data)}[/{style}]")
 
     elif event == "parse_error":
         console.print(f"{prefix}[error]✦ 日志解析失败：{data.get('error', 'unknown error')}[/error]")
