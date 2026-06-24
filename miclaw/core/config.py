@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +18,15 @@ SCRIPTS_DIR = os.path.join(WORKSPACE_DIR, "scripts")       # 脚本区：自动�
 OFFICE_DIR = os.path.join(WORKSPACE_DIR, "office")         # 沙盒工位 唯一被允许执行文件与shell操作的空间
 SKILLS_DIR = os.path.join(OFFICE_DIR, "skills")            # 技能卡槽
 TASKS_FILE = os.path.join(WORKSPACE_DIR, "tasks.json")
+
+
+def get_log_file_path(workspace: Path | str | None = None, log_file: Path | str | None = None) -> Path:
+    """解析 MiClaw JSONL log 文件路径。"""
+    if log_file is not None:
+        return Path(log_file).expanduser()
+
+    workspace_root = Path(workspace or WORKSPACE_DIR).expanduser()
+    return workspace_root / "logs" / "miclaw.jsonl"
 
 for d in [WORKSPACE_DIR, MEMORY_DIR, PERSONAS_DIR, SCRIPTS_DIR, OFFICE_DIR, SKILLS_DIR]:
     os.makedirs(d, exist_ok=True)

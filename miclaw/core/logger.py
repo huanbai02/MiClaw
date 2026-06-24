@@ -5,7 +5,10 @@ import queue
 import atexit
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
+
+from .config import get_log_file_path
 
 # 内存队列 + 守护线程
 class JSONLEventLogger:
@@ -13,19 +16,40 @@ class JSONLEventLogger:
     _instance = None
     _lock = threading.Lock()
 
-    def __new__(cls, log_dir: str = "logs"):
+    def __new__(
+        cls,
+        log_dir: str | Path | None = None,
+        *,
+        log_file: str | Path | None = None,
+        workspace: str | Path | None = None,
+    ):
+        if log_dir is not None or log_file is not None or workspace is not None:
+            instance = super().__new__(cls)
+            instance._init_logger(log_dir=log_dir, log_file=log_file, workspace=workspace)
+            return instance
+
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
-                cls._instance._init_logger(log_dir)
+                cls._instance._init_logger()
             return cls._instance
         
-    def _init_logger(self, log_dir: str):
-        self.log_dir = log_dir
-        os.makedirs(self.log_dir, exist_ok=True)
+    def _init_logger(
+        self,
+        log_dir: str | Path | None = None,
+        log_file: str | Path | None = None,
+        workspace: str | Path | None = None,
+    ):
+        self.log_dir = Path(log_dir).expanduser() if log_dir is not None else None
+        self.log_file = None if self.log_dir is not None else get_log_file_path(workspace=workspace, log_file=log_file)
+        if self.log_dir is not None:
+            os.makedirs(self.log_dir, exist_ok=True)
+        else:
+            os.makedirs(self.log_file.parent, exist_ok=True)
 
         # 无界内存队列，用于缓冲日志事件
         self.log_queue = queue.Queue()
+        self._closed = False
 
         self.worker_thread = threading.Thread(target=self._write_loop, daemon=True)
         self.worker_thread.start()
@@ -43,10 +67,7 @@ class JSONLEventLogger:
                 break
 
             try:
-                thread_id = log_item.get("thread_id", "system")
-                safe_id = "".join(c for c in thread_id if c.isalnum() or c in "-_") or "default"
-                file_path = os.path.join(self.log_dir, f"{safe_id}.jsonl")
-
+                file_path = self._resolve_write_path(log_item)
                 with open(file_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(log_item, ensure_ascii=False) + "\n")
             except Exception as e:
@@ -68,8 +89,19 @@ class JSONLEventLogger:
         self.log_queue.put(log_item)
 
     def shutdown(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self.log_queue.put(None)
         self.log_queue.join()
+
+    def _resolve_write_path(self, log_item: dict) -> Path:
+        """兼容旧 log_dir per-thread 文件和新的单文件 log path。"""
+        if self.log_dir is None:
+            return self.log_file
+        thread_id = str(log_item.get("thread_id", "system"))
+        safe_id = "".join(c for c in thread_id if c.isalnum() or c in "-_") or "default"
+        return self.log_dir / f"{safe_id}.jsonl"
 
 audit_logger = JSONLEventLogger()
 

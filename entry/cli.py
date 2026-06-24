@@ -2,6 +2,7 @@ import os
 import typer
 import questionary
 import logging
+from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
@@ -187,11 +188,13 @@ def run_agent():
     miclaw_main.main()
 
 @app.command("monitor")
-def run_monitor():    
+def run_monitor(
+    log_file: Optional[str] = typer.Option(None, "--log-file", help="指定要读取的 JSONL log 文件。")
+):
         
     try:
         import entry.monitor as miclaw_monitor
-        miclaw_monitor.main()
+        miclaw_monitor.main(log_file=log_file)
     except ImportError as e:
         console.print(f"[bold red]启动失败：找不到监视器模块！[/bold red]\n[dim]请确保 monitor.py 和 cli.py 在同一目录下。\n报错信息: {e}[/dim]")
 
