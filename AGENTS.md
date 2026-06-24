@@ -33,7 +33,7 @@ MiClaw 是一个本地优先、可观察、可约束、可扩展的终端 AI Age
 - 变更保持最小、聚焦，避免无关重构、重命名和大规模格式化。
 - 代码应清晰直接，优先显式逻辑，避免过度抽象。
 - 新增核心逻辑必须补测试；修 bug 先补能复现问题的回归测试。
-- 公共函数、复杂内部函数需要简洁 docstring：说明用途、参数、返回值；不要写模板化废话或重复代码本身。
+- 公共函数、复杂内部函数需要简洁 docstring：说明用途、参数、返回值；不要写模板化废话或重复代码本身，使用中文，保留英文术语。
 - 错误处理要明确，不要静默吞异常；用户可见错误应给出可行动信息。
 - 不新增依赖，除非确有必要；新增依赖时同步更新 `requirements.txt` 和安装/使用文档。
 - 文件、shell、模型、网络等外部输入都视为不可信，必须做边界检查。
@@ -41,9 +41,10 @@ MiClaw 是一个本地优先、可观察、可约束、可扩展的终端 AI Age
 
 ## Sandbox 与工具安全
 
-- `office/` 是模型文件读写和 shell 执行的唯一工作区。
+- 默认情况下，`office/` 是模型文件读写和 shell 执行的安全工作区；真实项目目录只能通过显式 project workspace 和权限模型访问。
 - 路径校验应基于真实路径包含关系，例如 `Path.resolve()` + `relative_to()` 或 `os.path.commonpath()`。
 - 必须拦截 `..`、绝对路径、Windows 盘符路径、符号链接逃逸等越权访问。
+- 真实项目目录的访问应分阶段开放：默认允许只读分析，写入、patch 应用和 shell 执行必须经过权限判断、用户确认和日志记录。
 - shell 执行默认最小权限、有限超时、保留 stdout/stderr/exit code；高风险命令应有明确阻断或审批机制。
 - 新增工具时要定义清晰参数 schema、权限边界、失败返回和测试用例。
 
@@ -75,14 +76,14 @@ miclaw monitor --help
 
 优先级从高到低：
 
-1. 安全底座：修复 sandbox 路径校验、shell 权限控制、危险操作审计。
-2. 工具体系：统一工具 schema、权限等级、超时、错误格式和测试覆盖。
-3. Skill 生态：完善 SKILL.md 元数据、启停/安装/校验、懒加载和多文件技能支持。
-4. MCP 接入：支持配置 MCP server，将外部 tools 安全接入 Agent。
-5. Memory/Context：区分用户画像、项目记忆、任务记忆和短期摘要，保证可审计注入。
-6. Observability：完善 JSONL trace、monitor、日志路径配置、token/latency/error 记录。
-7. Scheduler：把 `tasks.json` 轮询逐步升级为可持久化、可暂停、可重试的任务系统。
-8. 工程化：补齐 `pyproject.toml`、ruff/mypy/CI、更多边界测试和架构文档。
+1. 安全底座：修复 sandbox 路径校验，建立文件、shell、网络、MCP 等能力的权限模型，支持危险操作审计和用户确认。
+2. 工具体系：统一工具 schema、权限等级、超时、错误格式、ToolResult 和测试覆盖。
+3. Observability：完善 JSONL trace、monitor、日志路径配置、permission decision、token/latency/error 记录。
+4. 工程化：补齐 `pyproject.toml`、ruff/mypy/CI、更多边界测试和架构文档。
+5. Skill 生态：完善 SKILL.md 元数据、启停/安装/校验、懒加载和多文件技能支持。
+6. MCP 接入：支持配置 MCP server，将外部 tools 安全接入 Agent。
+7. Memory/Context：区分用户画像、项目记忆、任务记忆和短期摘要，保证可审计注入。
+8. Scheduler：把 `tasks.json` 轮询逐步升级为可持久化、可暂停、可重试的任务系统。
 
 ## 交付要求
 

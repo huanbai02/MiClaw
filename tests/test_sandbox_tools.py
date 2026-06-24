@@ -1,119 +1,170 @@
-import unittest
-from unittest.mock import patch, mock_open
 import os
 import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import miclaw.core.tools.sandbox_tools as sandbox_tools
 from miclaw.core.tools.sandbox_tools import (
+    _get_safe_path,
+    _resolve_existing_office_path,
+    _resolve_new_office_path,
+    execute_office_shell,
     list_office_files,
     read_office_file,
     write_office_file,
-    execute_office_shell,
-    _get_safe_path
 )
-from miclaw.core.config import OFFICE_DIR
 
 
-class TestSandboxTools(unittest.TestCase):
-
-    def test_get_safe_path_normal(self):
-        """测试正常路径连接"""
-        # _get_safe_path 是内部函数，不受装饰器影响，可以直接调用
-        # 注意：OFFICE_DIR 是模块级常量，patch 需要在导入前或使用正确的路径
-        original_office_dir = OFFICE_DIR
-        try:
-            # 使用实际 OFFICE_DIR 测试
-            result = _get_safe_path('subdir/file.txt')
-            expected = os.path.abspath(os.path.join(OFFICE_DIR, 'subdir/file.txt'))
-            self.assertEqual(result, expected)
-        finally:
-            pass
-
-    def test_get_safe_path_traversal_attempt(self):
-        """测试路径遍历攻击"""
-        with self.assertRaises(PermissionError):
-            _get_safe_path('../../forbidden/file.txt')
-
-    @patch('miclaw.core.tools.sandbox_tools.os.path.exists', return_value=True)
-    @patch('miclaw.core.tools.sandbox_tools.os.listdir', return_value=['file1.txt', 'subdir'])
-    @patch('miclaw.core.tools.sandbox_tools.os.path.isdir', side_effect=lambda x: x.endswith('subdir'))
-    def test_list_office_files(self, mock_isdir, mock_listdir, mock_exists):
-        """测试列出办公文件功能"""
-        # 工具需要通过 .invoke() 调用
-        result = list_office_files.invoke({"sub_dir": ""})
-
-        # 验证函数调用了正确的路径检查
-        mock_exists.assert_called_once()
-        mock_listdir.assert_called_once()
-
-        # 检查返回结果包含预期元素
-        self.assertIn("📄 file1.txt", result)
-        self.assertIn("📁 subdir", result)
-
-    @patch('miclaw.core.tools.sandbox_tools.os.path.exists', return_value=False)
-    def test_list_office_files_nonexistent_dir(self, mock_exists):
-        """测试列出不存在目录的文件"""
-        result = list_office_files.invoke({"sub_dir": "nonexistent"})
-        self.assertIn("目录不存在", result)
-
-    @patch('miclaw.core.tools.sandbox_tools.os.path.exists', return_value=True)
-    @patch('builtins.open', new_callable=mock_open, read_data="file content")
-    def test_read_office_file_success(self, mock_file, mock_exists):
-        """测试成功读取办公文件"""
-        result = read_office_file.invoke({"filepath": "test.txt"})
-        self.assertEqual(result, "file content")
-        mock_file.assert_called_once()
-
-    @patch('miclaw.core.tools.sandbox_tools.os.path.exists', return_value=False)
-    def test_read_office_file_nonexistent(self, mock_exists):
-        """测试读取不存在的办公文件"""
-        result = read_office_file.invoke({"filepath": "nonexistent.txt"})
-        self.assertIn("文件不存在", result)
-
-    @patch('builtins.open', new_callable=mock_open)
-    @patch('os.makedirs')
-    def test_write_office_file_success(self, mock_makedirs, mock_file):
-        """测试成功写入办公文件"""
-        result = write_office_file.invoke({"filepath": "test.txt", "content": "test content", "mode": "w"})
-        self.assertIn("成功以 覆盖/新建 模式写入文件", result)
-        mock_file.assert_called_once()
-        mock_makedirs.assert_called_once()
-
-    def test_write_office_file_invalid_mode(self):
-        """测试写入办公文件 - 无效模式"""
-        result = write_office_file.invoke({"filepath": "test.txt", "content": "test content", "mode": "x"})
-        self.assertIn("❌ 错误：mode 参数必须是", result)
-
-    @patch('miclaw.core.tools.sandbox_tools.subprocess.run')
-    def test_execute_office_shell_safe_command(self, mock_subprocess):
-        """测试执行安全的 shell 命令"""
-        # Mock subprocess 结果
-        mock_result = mock_subprocess.return_value
-        mock_result.returncode = 0
-        mock_result.stdout = "command output"
-        mock_result.stderr = ""
-
-        result = execute_office_shell.invoke({"command": "ls"})
-        # 输出格式包含前缀空格和中文冒号 - 使用更宽松的匹配
-        self.assertIn("ls", result)
-        self.assertIn("command output", result)
-
-    def test_execute_office_shell_dangerous_commands(self):
-        """测试执行危险命令会被拦截"""
-        dangerous_commands = [
-            "cd ../",
-            "cat /etc/passwd",
-            "ls ~",
-            "dir \\",
-            "type C:\\windows\\system32\\config\\sam"
-        ]
-
-        for cmd in dangerous_commands:
-            with self.subTest(cmd=cmd):
-                result = execute_office_shell.invoke({"command": cmd})
-                self.assertIn("❌ 权限拒绝", result)
+@pytest.fixture()
+def office(tmp_path, monkeypatch):
+    office_dir = tmp_path / "workspace" / "office"
+    office_dir.mkdir(parents=True)
+    monkeypatch.setattr(sandbox_tools, "OFFICE_DIR", str(office_dir))
+    return office_dir
 
 
-if __name__ == '__main__':
-    unittest.main()
+def test_get_safe_path_normal(office):
+    result = Path(_get_safe_path("subdir/file.txt"))
+    assert result == (office / "subdir" / "file.txt").resolve()
+
+
+def test_normal_relative_file_read_write_inside_office_succeeds(office):
+    result = write_office_file.invoke({"filepath": "note.txt", "content": "hello", "mode": "w"})
+
+    assert "成功以 覆盖/新建 模式写入文件" in result
+    assert (office / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert read_office_file.invoke({"filepath": "note.txt"}) == "hello"
+
+
+def test_nested_relative_path_inside_office_succeeds(office):
+    result = write_office_file.invoke({"filepath": "nested/deep/note.txt", "content": "nested", "mode": "w"})
+
+    assert "成功以 覆盖/新建 模式写入文件" in result
+    assert read_office_file.invoke({"filepath": "nested/deep/note.txt"}) == "nested"
+    assert "📁 deep" in list_office_files.invoke({"sub_dir": "nested"})
+
+
+@pytest.mark.parametrize(
+    "user_path, expected_message",
+    [
+        ("../memory/user_profile.md", "Path traversal outside office is not allowed"),
+        ("/etc/passwd", "Absolute paths are not allowed"),
+        ("../office_evil/file.txt", "Path traversal outside office is not allowed"),
+        (r"C:\Users\x\secret.txt", "Windows drive paths are not allowed"),
+    ],
+)
+def test_unsafe_paths_are_rejected_by_resolvers(office, user_path, expected_message):
+    with pytest.raises(PermissionError, match=expected_message):
+        _resolve_existing_office_path(user_path)
+
+    result = read_office_file.invoke({"filepath": user_path})
+    assert expected_message in result
+
+
+def test_writing_new_file_inside_office_succeeds(office):
+    result = write_office_file.invoke({"filepath": "new_dir/new_file.txt", "content": "new", "mode": "w"})
+
+    assert "成功以 覆盖/新建 模式写入文件" in result
+    assert (office / "new_dir" / "new_file.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_writing_new_file_through_parent_traversal_is_rejected(office):
+    result = write_office_file.invoke({"filepath": "../outside.txt", "content": "nope", "mode": "w"})
+
+    assert "Path traversal outside office is not allowed" in result
+    assert not (office.parent / "outside.txt").exists()
+
+
+def test_list_office_files_nonexistent_dir(office):
+    result = list_office_files.invoke({"sub_dir": "nonexistent"})
+    assert "目录不存在" in result
+
+
+def test_read_office_file_nonexistent(office):
+    result = read_office_file.invoke({"filepath": "nonexistent.txt"})
+    assert "文件不存在" in result
+
+
+def test_write_office_file_invalid_mode(office):
+    result = write_office_file.invoke({"filepath": "test.txt", "content": "test content", "mode": "x"})
+    assert "❌ 错误：mode 参数必须是" in result
+    assert not (office / "test.txt").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlink is not supported on this platform")
+def test_symlink_inside_office_pointing_outside_is_rejected(office, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    link = office / "secret-link.txt"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    assert "Path is outside the office workspace" in read_office_file.invoke({"filepath": "secret-link.txt"})
+    assert "Path is outside the office workspace" in write_office_file.invoke(
+        {"filepath": "secret-link.txt", "content": "overwrite", "mode": "w"}
+    )
+    assert secret.read_text(encoding="utf-8") == "secret"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlink is not supported on this platform")
+def test_shell_rejects_office_with_symlink_escape(office, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (office / "outside-link").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    result = execute_office_shell.invoke({"command": "ls"})
+    assert "Path is outside the office workspace" in result
+
+
+@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+def test_execute_office_shell_safe_command_uses_resolved_office_cwd(mock_subprocess, office):
+    mock_result = mock_subprocess.return_value
+    mock_result.returncode = 0
+    mock_result.stdout = "command output"
+    mock_result.stderr = ""
+
+    result = execute_office_shell.invoke({"command": "ls"})
+
+    assert "ls" in result
+    assert "command output" in result
+    mock_subprocess.assert_called_once()
+    assert mock_subprocess.call_args.kwargs["cwd"] == str(office.resolve())
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "cd ../",
+        "cat /etc/passwd",
+        "ls ~",
+        "dir \\",
+        r"type C:\windows\system32\config\sam",
+    ],
+)
+def test_execute_office_shell_dangerous_commands(cmd, office):
+    result = execute_office_shell.invoke({"command": cmd})
+    assert "❌ 权限拒绝" in result
+
+
+def test_resolve_new_office_path_rejects_parent_symlink_escape(office, tmp_path):
+    outside = tmp_path / "outside-parent"
+    outside.mkdir()
+    link = office / "link-parent"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(PermissionError, match="Path is outside the office workspace"):
+        _resolve_new_office_path("link-parent/new-file.txt")
