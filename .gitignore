@@ -27,3 +27,4 @@ workspace/memory/*.md
 workspace/office
 
 *.egg-info/
+.omx/
