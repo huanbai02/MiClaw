@@ -5,6 +5,13 @@ import subprocess
 from pathlib import Path, PureWindowsPath
 
 from .base import miclaw_tool
+from .result import (
+    ToolResult,
+    format_tool_result_for_model,
+    tool_error,
+    tool_permission_blocked,
+    tool_success,
+)
 from ..config import OFFICE_DIR
 from ..permissions import (
     PermissionCapability,
@@ -98,6 +105,18 @@ def _relative_office_target(path: Path) -> str:
     return "." if not relative_path.parts else relative_path.as_posix()
 
 
+def _format_result(result: ToolResult) -> str:
+    """统一把内部 ToolResult 转成 model-facing string。"""
+    return format_tool_result_for_model(result)
+
+
+def _tool_metadata(tool_name: str, operation: str, target: str, **extra) -> dict:
+    """生成 sandbox tool 的基础 metadata。"""
+    metadata = {"tool_name": tool_name, "operation": operation, "target": target}
+    metadata.update(extra)
+    return metadata
+
+
 def _permission_block_message(result: PermissionResult) -> str:
     """把 DENY/ASK permission result 转换为用户可见阻断消息。"""
     if result.decision is PermissionDecision.ASK:
@@ -110,12 +129,17 @@ def _evaluate_office_permission(request: PermissionRequest) -> PermissionResult:
     return _permission_evaluator(request)
 
 
-def _require_allowed_permission(request: PermissionRequest) -> str | None:
-    """仅 ALLOW 可继续执行；DENY/ASK 都返回阻断消息。"""
+def _require_allowed_permission(request: PermissionRequest, metadata: dict) -> ToolResult | None:
+    """仅 ALLOW 可继续执行；DENY/ASK 都返回阻断 ToolResult。"""
     result = _evaluate_office_permission(request)
+    metadata["permission_decision"] = result.decision.value
     if result.decision is PermissionDecision.ALLOW:
         return None
-    return _permission_block_message(result)
+    return tool_permission_blocked(
+        _permission_block_message(result),
+        decision=result.decision.value,
+        metadata=metadata,
+    )
 
 
 @miclaw_tool
@@ -126,24 +150,29 @@ def list_office_files(sub_dir: str = "") -> str:
     """
     try:
         target_dir = _resolve_existing_office_path(sub_dir)
-        block_message = _require_allowed_permission(
+        target = _relative_office_target(target_dir)
+        metadata = _tool_metadata("list_office_files", "list", target)
+        block_result = _require_allowed_permission(
             PermissionRequest(
                 capability=PermissionCapability.FILE_READ,
                 operation="list",
-                target=_relative_office_target(target_dir),
+                target=target,
                 risk_level=RiskLevel.LOW,
                 reason="List files in office workspace",
-            )
+            ),
+            metadata,
         )
-        if block_message:
-            return block_message
+        if block_result:
+            return _format_result(block_result)
 
         if not target_dir.exists():
-            return f"目录不存在：{sub_dir}"
+            message = f"目录不存在：{sub_dir}"
+            return _format_result(tool_error("file_not_found", message, content=message, metadata=metadata))
 
         items = os.listdir(target_dir)
         if not items:
-            return f"[{sub_dir if sub_dir else 'office 根目录'}] 是空的。"
+            message = f"[{sub_dir if sub_dir else 'office 根目录'}] 是空的。"
+            return _format_result(tool_success(message, data={"items": []}, metadata=metadata))
 
         # 格式化输出，标注是文件还是文件夹
         result = []
@@ -152,9 +181,25 @@ def list_office_files(sub_dir: str = "") -> str:
             item_type = "📁" if item_path.is_dir() else "📄"
             result.append(f"{item_type} {item}")
 
-        return "\n".join(result)
+        return _format_result(tool_success("\n".join(result), data={"items": items}, metadata=metadata))
+    except PermissionError as e:
+        return _format_result(
+            tool_error(
+                "path_error",
+                str(e),
+                content=str(e),
+                metadata=_tool_metadata("list_office_files", "list", str(sub_dir or ".")),
+            )
+        )
     except Exception as e:
-        return str(e)
+        return _format_result(
+            tool_error(
+                "unexpected_error",
+                str(e),
+                content=str(e),
+                metadata=_tool_metadata("list_office_files", "list", str(sub_dir or ".")),
+            )
+        )
 
 
 @miclaw_tool
@@ -165,29 +210,56 @@ def read_office_file(filepath: str) -> str:
     """
     try:
         target_path = _resolve_existing_office_path(filepath)
-        block_message = _require_allowed_permission(
+        target = _relative_office_target(target_path)
+        metadata = _tool_metadata("read_office_file", "read", target)
+        block_result = _require_allowed_permission(
             PermissionRequest(
                 capability=PermissionCapability.FILE_READ,
                 operation="read",
-                target=_relative_office_target(target_path),
+                target=target,
                 risk_level=RiskLevel.LOW,
                 reason="Read file from office workspace",
-            )
+            ),
+            metadata,
         )
-        if block_message:
-            return block_message
+        if block_result:
+            return _format_result(block_result)
 
         if not target_path.exists():
-            return f"文件不存在：{filepath}"
+            message = f"文件不存在：{filepath}"
+            return _format_result(tool_error("file_not_found", message, content=message, metadata=metadata))
 
         with open(target_path, "r", encoding="utf-8") as f:
             content = f.read()
-            # 防爆截断：防止读取几个 G 的日志把 Token 撑爆
-            if len(content) > 10000:
-                return content[:10000] + "\n\n...[内容过长，已被安全截断]..."
-            return content
+            original_length = len(content)
+            truncated = original_length > 10000
+            if truncated:
+                content = content[:10000] + "\n\n...[内容过长，已被安全截断]..."
+            return _format_result(
+                tool_success(
+                    content,
+                    data={"content_length": original_length, "truncated": truncated},
+                    metadata=metadata,
+                )
+            )
+    except PermissionError as e:
+        return _format_result(
+            tool_error(
+                "path_error",
+                str(e),
+                content=str(e),
+                metadata=_tool_metadata("read_office_file", "read", str(filepath or "")),
+            )
+        )
     except Exception as e:
-        return str(e)
+        return _format_result(
+            tool_error(
+                "unexpected_error",
+                str(e),
+                content=str(e),
+                metadata=_tool_metadata("read_office_file", "read", str(filepath or "")),
+            )
+        )
 
 
 @miclaw_tool
@@ -209,21 +281,25 @@ def write_office_file(filepath: str, content: str, mode: str = "w") -> str:
     """
     try:
         target_path = _resolve_new_office_path(filepath)
-        block_message = _require_allowed_permission(
+        target = _relative_office_target(target_path)
+        metadata = _tool_metadata("write_office_file", "write", target)
+        block_result = _require_allowed_permission(
             PermissionRequest(
                 capability=PermissionCapability.FILE_WRITE,
                 operation="write",
-                target=_relative_office_target(target_path),
+                target=target,
                 risk_level=RiskLevel.LOW,
                 reason="Write file in office workspace",
-            )
+            ),
+            metadata,
         )
-        if block_message:
-            return block_message
+        if block_result:
+            return _format_result(block_result)
 
         # 严格校验传入的 mode
         if mode not in ["w", "a"]:
-            return "❌ 错误：mode 参数必须是 'w' (覆盖) 或 'a' (追加)。"
+            message = "❌ 错误：mode 参数必须是 'w' (覆盖) 或 'a' (追加)。"
+            return _format_result(tool_error("invalid_mode", message, content=message, metadata=metadata))
 
         # 如果模型想在子目录里写文件，确保子目录存在
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,9 +312,32 @@ def write_office_file(filepath: str, content: str, mode: str = "w") -> str:
                 f.write(content)
 
         action = "覆盖/新建" if mode == "w" else "追加"
-        return f" ● 成功以 {action} 模式写入文件：{filepath} (共 {len(content)} 字符)"
+        message = f" ● 成功以 {action} 模式写入文件：{filepath} (共 {len(content)} 字符)"
+        return _format_result(
+            tool_success(
+                message,
+                data={"bytes_written": len(content), "mode": mode},
+                metadata=metadata,
+            )
+        )
+    except PermissionError as e:
+        return _format_result(
+            tool_error(
+                "path_error",
+                str(e),
+                content=str(e),
+                metadata=_tool_metadata("write_office_file", "write", str(filepath or "")),
+            )
+        )
     except Exception as e:
-        return str(e)
+        return _format_result(
+            tool_error(
+                "unexpected_error",
+                str(e),
+                content=str(e),
+                metadata=_tool_metadata("write_office_file", "write", str(filepath or "")),
+            )
+        )
 
 
 @miclaw_tool
@@ -253,6 +352,7 @@ def execute_office_shell(command: str) -> str:
     4. [无状态警告] 每次执行都是独立的终端进程！需要进入子目录请使用“命令链”或相对路径。
     5. 禁止一切形式跳出office工位!!! 例如运行跳出或查看office路径的任何脚本以及其他高危操作。
     """
+    metadata = _tool_metadata("execute_office_shell", "execute", "office")
     try:
         dangerous_patterns = [
             r"\.\.",                        # 杀招1：拦截所有相对路径越权 (如 ../)
@@ -263,11 +363,13 @@ def execute_office_shell(command: str) -> str:
         ]
         for pattern in dangerous_patterns:
             if re.search(pattern, command):
-                return "❌ 权限拒绝：检测到危险的目录跳转指令。你被禁止离开 office 工位！"
+                message = "❌ 权限拒绝：检测到危险的目录跳转指令。你被禁止离开 office 工位！"
+                return _format_result(tool_error("shell_error", message, content=message, metadata=metadata))
 
         office_root = _get_office_root()
+        metadata = _tool_metadata("execute_office_shell", "execute", "office", cwd=str(office_root))
         _ensure_no_symlink_escape_in_office()
-        block_message = _require_allowed_permission(
+        block_result = _require_allowed_permission(
             PermissionRequest(
                 capability=PermissionCapability.SHELL_EXEC,
                 operation="execute",
@@ -275,10 +377,11 @@ def execute_office_shell(command: str) -> str:
                 arguments={"command_preview": command[:200]},
                 risk_level=RiskLevel.MEDIUM,
                 reason="Execute shell command in office workspace",
-            )
+            ),
+            metadata,
         )
-        if block_message:
-            return block_message
+        if block_result:
+            return _format_result(block_result)
 
         result = subprocess.run(
             command,
@@ -311,9 +414,17 @@ def execute_office_shell(command: str) -> str:
             else:
                 output += "\n(异常退出：Exit Code 非 0，无错误日志输出)"
 
-        return output
+        return _format_result(
+            tool_success(
+                output,
+                data={"stdout_length": len(stdout), "stderr_length": len(stderr)},
+                metadata={**metadata, "exit_code": result.returncode},
+            )
+        )
 
     except subprocess.TimeoutExpired:
-        return "❌ 严重错误：命令执行超时（60s）被熔断！请检查是否有阻塞式交互。"
+        message = "❌ 严重错误：命令执行超时（60s）被熔断！请检查是否有阻塞式交互。"
+        return _format_result(tool_error("timeout", message, content=message, metadata={**metadata, "timeout": 60}))
     except Exception as e:
-        return f"❌ 执行异常：{str(e)}"
+        message = f"❌ 执行异常：{str(e)}"
+        return _format_result(tool_error("unexpected_error", str(e), content=message, metadata=metadata))
