@@ -140,6 +140,8 @@ def test_shell_default_ask_logs_event_and_does_not_call_subprocess(mock_subproce
     assert event["metadata"]["cwd_scope"] == "office"
     assert event["metadata"]["shell_command_present"] is True
     assert event["metadata"]["command_length"] == len("echo hello")
+    assert event["metadata"]["shell_risk_level"] == "safe"
+    assert event["metadata"]["blocked_by_shell_safety"] is False
     assert "command_preview" not in event["metadata"]
     assert "cwd" not in event["metadata"]
 
@@ -206,6 +208,8 @@ def test_shell_event_does_not_log_command_preview_or_secret_substrings(office, a
     assert "Bearer" not in event_text
     assert event["metadata"]["shell_command_present"] is True
     assert event["metadata"]["command_length"] == len(command)
+    assert event["metadata"]["shell_risk_level"] == "safe"
+    assert event["metadata"]["blocked_by_shell_safety"] is False
 
 
 def test_shell_event_uses_safe_cwd_marker_not_absolute_path(office, audit_events):
@@ -216,6 +220,15 @@ def test_shell_event_uses_safe_cwd_marker_not_absolute_path(office, audit_events
     assert str(office) not in event_text
     assert event["metadata"]["cwd_scope"] == "office"
     assert "cwd" not in event["metadata"]
+
+
+def test_shell_safety_blocked_command_does_not_emit_permission_audit_event(office, audit_events, monkeypatch):
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
+
+    result = execute_office_shell.invoke({"command": "sudo whoami"})
+
+    assert "blocked by safety policy" in result
+    assert audit_events == []
 
 
 def test_build_permission_decision_event_filters_sensitive_metadata(office):
@@ -239,6 +252,8 @@ def test_build_permission_decision_event_filters_sensitive_metadata(office):
             "cwd_scope": "office",
             "shell_command_present": True,
             "command_length": 123,
+            "shell_risk_level": "safe",
+            "blocked_by_shell_safety": False,
             "token": "secret-token",
             "content": "secret content",
             "target": "safe.txt",
@@ -256,6 +271,8 @@ def test_build_permission_decision_event_filters_sensitive_metadata(office):
         "cwd_scope": "office",
         "shell_command_present": True,
         "command_length": 123,
+        "shell_risk_level": "safe",
+        "blocked_by_shell_safety": False,
         "target": "safe.txt",
         "permission_decision": "allow",
     }

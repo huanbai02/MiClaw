@@ -2,6 +2,8 @@ import os
 import platform
 import re
 import subprocess
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path, PureWindowsPath
 
 from .base import miclaw_tool
@@ -26,6 +28,26 @@ from ..permissions import (
 SYS_OS = platform.system()
 _permission_evaluator = evaluate_permission
 _permission_audit_logger = log_permission_decision
+SHELL_TIMEOUT_SECONDS = 10
+SHELL_OUTPUT_LIMIT = 4000
+
+
+class ShellCommandRisk(str, Enum):
+    """Shell command 风险等级。"""
+
+    SAFE = "safe"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+@dataclass(frozen=True)
+class ShellCommandClassification:
+    """描述 shell safety baseline 的分类结果。"""
+
+    risk_level: ShellCommandRisk
+    reason: str
+    blocked: bool = False
 
 
 def _get_office_root() -> Path:
@@ -117,6 +139,66 @@ def _tool_metadata(tool_name: str, operation: str, target: str, **extra) -> dict
     metadata = {"tool_name": tool_name, "operation": operation, "target": target}
     metadata.update(extra)
     return metadata
+
+
+def classify_shell_command(command: str) -> ShellCommandClassification:
+    """用保守 regex baseline 分类 shell command；不尝试做完整 shell parser。"""
+    command_text = str(command or "")
+    normalized = " ".join(command_text.strip().split())
+    compact = re.sub(r"\s+", "", command_text)
+
+    if not normalized:
+        return ShellCommandClassification(ShellCommandRisk.MEDIUM, "Empty shell command", blocked=True)
+
+    critical_patterns = [
+        (r"(?:^|[;&|]\s*)rm\s+.*-(?:[^\s]*r[^\s]*f|[^\s]*f[^\s]*r)\s+(?:/|~|/\*)(?:\s|$)", "Recursive removal of root or home is blocked"),
+        (r"(?:^|[;&|]\s*)sudo(?:\s|$)", "Privilege escalation with sudo is blocked"),
+        (r"(?:^|[;&|]\s*)su(?:\s|$)", "Privilege escalation with su is blocked"),
+        (r"(?:^|[;&|]\s*)chmod\s+-R\s+777\s+/", "Recursive world-writable chmod on root is blocked"),
+        (r"(?:^|[;&|]\s*)chown\s+-R(?:\s|$)", "Recursive chown is blocked"),
+        (r"(?:^|[;&|]\s*)mkfs(?:\.[\w-]+)?(?:\s|$)", "Filesystem formatting commands are blocked"),
+        (r"(?:^|[;&|]\s*)dd\s+.*\bif=", "Raw disk copy commands using dd are blocked"),
+        (r"(?:^|[;&|]\s*)(?:shutdown|reboot|poweroff|halt)(?:\s|$)", "System power commands are blocked"),
+        (r"\b(?:curl|wget)\b[^|;\n]*\|\s*(?:sudo\s+)?(?:sh|bash)\b", "Piping remote downloads into a shell is blocked"),
+        (r"\b(?:bash|sh)\s*<\s*\(\s*(?:curl|wget)\b", "Process substitution from remote download into shell is blocked"),
+        (r"\b(?:nc|ncat)\b[^\n;|&]*\s-e(?:\s|$)", "Netcat exec mode is blocked"),
+    ]
+    for pattern, reason in critical_patterns:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            return ShellCommandClassification(ShellCommandRisk.CRITICAL, reason, blocked=True)
+
+    if ":(){:|:&};:" in compact:
+        return ShellCommandClassification(ShellCommandRisk.CRITICAL, "Fork bomb pattern is blocked", blocked=True)
+
+    high_patterns = [
+        (r"\b(?:bash|sh)\s+-[a-zA-Z]*c[a-zA-Z]*(?:\s|$)", "Nested shell execution is blocked"),
+        (r"\bpython3?\s+-c\b.*(?:\bos\.system\b|\bsubprocess\b|\bpopen\b|\bPopen\b|\bsystem\s*\(|\bimport\s+subprocess\b|\bfrom\s+os\s+import\s+system\b)", "Inline Python process execution is blocked"),
+        (r"(?:^|[;&|]\s*)chmod\s+-R\s+777\s+\S+", "Recursive world-writable chmod is blocked"),
+        (r"(?:^|[;&|]\s*)git\s+clean\s+-[^\s]*[fxd][^\s]*(?:\s|$)", "Destructive git clean command is blocked"),
+        (r"(?:^|[;&|]\s*)rm\s+.*-(?:[^\s]*r[^\s]*f|[^\s]*f[^\s]*r)\s+\S+", "Recursive force removal is blocked"),
+    ]
+    for pattern, reason in high_patterns:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            return ShellCommandClassification(ShellCommandRisk.HIGH, reason, blocked=True)
+
+    medium_patterns = [
+        (r"(?:^|[;&|]\s*)(?:pip|pip3|python\s+-m\s+pip)\s+install(?:\s|$)", "Package installation changes the environment"),
+        (r"(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+install(?:\s|$)", "Package installation changes the workspace"),
+    ]
+    for pattern, reason in medium_patterns:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            return ShellCommandClassification(ShellCommandRisk.MEDIUM, reason, blocked=False)
+
+    return ShellCommandClassification(ShellCommandRisk.SAFE, "No baseline shell risk pattern matched", blocked=False)
+
+
+def _truncate_shell_output(text: str, limit: int = SHELL_OUTPUT_LIMIT) -> tuple[str, bool, int]:
+    """限制 model-facing shell output 长度，metadata 只保留长度和是否截断。"""
+    safe_text = str(text or "")
+    original_length = len(safe_text)
+    if original_length <= limit:
+        return safe_text, False, original_length
+    return f"{safe_text[:limit]}\n... [truncated]", True, original_length
 
 
 def _permission_block_message(result: PermissionResult) -> str:
@@ -362,6 +444,25 @@ def execute_office_shell(command: str) -> str:
     """
     metadata = _tool_metadata("execute_office_shell", "execute", "office")
     try:
+        classification = classify_shell_command(command)
+        metadata = _tool_metadata(
+            "execute_office_shell",
+            "execute",
+            "office",
+            shell_risk_level=classification.risk_level.value,
+            blocked_by_shell_safety=classification.blocked,
+        )
+        if classification.blocked:
+            message = f"❌ 权限拒绝：Shell command blocked by safety policy: {classification.reason}"
+            return _format_result(
+                tool_error(
+                    "blocked_shell_command",
+                    message,
+                    content=message,
+                    metadata=metadata,
+                )
+            )
+
         dangerous_patterns = [
             r"\.\.",                        # 杀招1：拦截所有相对路径越权 (如 ../)
             r"(?:^|\s|[<>|&;])/",           # 杀招2：Unix 拦截绝对路径 (连 cat </etc/passwd 这种黑客写法也防了)
@@ -379,6 +480,8 @@ def execute_office_shell(command: str) -> str:
             "cwd_scope": "office",
             "shell_command_present": bool(command),
             "command_length": len(command or ""),
+            "shell_risk_level": classification.risk_level.value,
+            "blocked_by_shell_safety": False,
         }
         metadata = _tool_metadata("execute_office_shell", "execute", "office", **safe_shell_metadata)
         _ensure_no_symlink_escape_in_office()
@@ -403,23 +506,25 @@ def execute_office_shell(command: str) -> str:
             capture_output=True,
             encoding='utf-8',
             errors='replace',
-            timeout=60
+            timeout=SHELL_TIMEOUT_SECONDS
         )
 
         output = f" ● 当前系统: {SYS_OS}\n"
         output += f" ● 执行命令: `{command}`\n"
         output += f" ● 退出码 (Exit Code): {result.returncode}\n"
 
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
+        stdout_raw = result.stdout.strip()
+        stderr_raw = result.stderr.strip()
+        stdout, stdout_truncated, stdout_length = _truncate_shell_output(stdout_raw)
+        stderr, stderr_truncated, stderr_length = _truncate_shell_output(stderr_raw)
 
         if result.returncode != 0 and ("prompt" in stderr.lower() or "y/n" in stdout.lower()):
             output += "\n💡 系统提示：命令可能由于交互式等待而失败。请重试并添加 -y 参数！"
 
         if stdout:
-            output += f"\n[STDOUT]\n{stdout[-2000:] if len(stdout) > 2000 else stdout}"
+            output += f"\n[STDOUT]\n{stdout}"
         if stderr:
-            output += f"\n[STDERR]\n{stderr[-2000:] if len(stderr) > 2000 else stderr}"
+            output += f"\n[STDERR]\n{stderr}"
 
         if not stdout and not stderr:
             if result.returncode == 0:
@@ -430,14 +535,21 @@ def execute_office_shell(command: str) -> str:
         return _format_result(
             tool_success(
                 output,
-                data={"stdout_length": len(stdout), "stderr_length": len(stderr)},
+                data={
+                    "stdout_length": stdout_length,
+                    "stderr_length": stderr_length,
+                    "stdout_truncated": stdout_truncated,
+                    "stderr_truncated": stderr_truncated,
+                },
                 metadata={**metadata, "exit_code": result.returncode},
             )
         )
 
     except subprocess.TimeoutExpired:
-        message = "❌ 严重错误：命令执行超时（60s）被熔断！请检查是否有阻塞式交互。"
-        return _format_result(tool_error("timeout", message, content=message, metadata={**metadata, "timeout": 60}))
+        message = f"❌ 严重错误：命令执行超时（{SHELL_TIMEOUT_SECONDS}s）被熔断！请检查是否有阻塞式交互。"
+        return _format_result(
+            tool_error("timeout", message, content=message, metadata={**metadata, "timeout": SHELL_TIMEOUT_SECONDS})
+        )
     except Exception as e:
         message = f"❌ 执行异常：{str(e)}"
         return _format_result(tool_error("unexpected_error", str(e), content=message, metadata=metadata))

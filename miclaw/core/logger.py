@@ -84,6 +84,8 @@ _SAFE_METADATA_KEYS = {
     "timeout",
     "shell_command_present",
     "command_length",
+    "shell_risk_level",
+    "blocked_by_shell_safety",
 }
 
 
