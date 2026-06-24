@@ -30,6 +30,12 @@ python -m pip install -e .
 miclaw config
 ```
 
+也可以先复制示例配置，再填入本地密钥：
+
+```bash
+cp .env.example .env
+```
+
 向导会写入项目根目录下的 `.env` 文件。常用配置项包括：
 
 ```env
@@ -102,8 +108,12 @@ MiClaw/
 
 ## 测试
 
+CI 会单独安装 `ruff`；本地运行 lint 前可先执行 `python -m pip install ruff`。
+
 ```bash
 python -m pytest
+python -m compileall miclaw tests
+python -m ruff check .
 ```
 
 可在安装后额外验证入口命令：
