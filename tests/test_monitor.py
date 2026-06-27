@@ -143,3 +143,36 @@ def test_malformed_jsonl_handling_still_works():
 
     assert event["event"] == "parse_error"
     monitor.render_event(event)
+
+
+def test_trace_prefix_renders_short_run_and_step():
+    text = monitor.format_trace_prefix({"run_id": "abcdef123456", "step_id": 3})
+
+    assert text == "[run=abcdef12 step=3] "
+
+
+def test_trace_prefix_omits_missing_trace_fields_for_old_events():
+    assert monitor.format_trace_prefix({"event": "system_action"}) == ""
+
+
+def test_render_event_tolerates_trace_fields_on_unknown_event():
+    monitor.render_event({"event": "future_event", "run_id": "abcdef123456", "step_id": 9})
+
+
+def test_trace_prefix_sanitizes_markup_like_values():
+    text = monitor.format_trace_prefix({"run_id": "[red]abcdef[/red]", "step_id": "[bold]9[/bold]"})
+
+    assert "[red]" not in text
+    assert "[/red]" not in text
+    assert "[bold]" not in text
+    assert "[/bold]" not in text
+    assert text.startswith("[run=redabcde step=bold9bold] ")
+
+
+def test_trace_prefix_for_markup_renders_literal_brackets():
+    from rich.text import Text
+
+    markup = monitor.format_trace_prefix_for_markup({"run_id": "abcdef123456", "step_id": 3})
+    plain = Text.from_markup(markup).plain
+
+    assert plain == "[run=abcdef12 step=3] "

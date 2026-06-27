@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_log_file_path
+from .trace import get_current_trace_context
 
 # 内存队列 + 守护线程
 class JSONLEventLogger:
@@ -85,8 +86,20 @@ class JSONLEventLogger:
             "event": event,
             **kwargs
         }
+        self._apply_trace_context(log_item)
 
         self.log_queue.put(log_item)
+
+    def _apply_trace_context(self, log_item: dict) -> None:
+        """在存在当前 TraceContext 时，为 event 补充 run_id 和 step_id。"""
+        context = get_current_trace_context()
+        if context is None:
+            return
+
+        if log_item.get("run_id") is None:
+            log_item["run_id"] = context.run_id
+        if log_item.get("run_id") == context.run_id and log_item.get("step_id") is None:
+            log_item["step_id"] = context.next_step_id()
 
     def shutdown(self):
         if getattr(self, "_closed", False):
@@ -127,6 +140,8 @@ def build_permission_decision_event(
     *,
     tool_name: str | None = None,
     metadata: dict | None = None,
+    run_id: str | None = None,
+    step_id: int | None = None,
 ) -> dict:
     """构建 JSON-friendly 的 permission_decision audit event。"""
     safe_metadata = _safe_permission_metadata(metadata or {})
@@ -145,6 +160,10 @@ def build_permission_decision_event(
         "error_type": _permission_error_type(decision),
         "metadata": safe_metadata,
     }
+    if run_id is not None:
+        event["run_id"] = str(run_id)
+    if step_id is not None:
+        event["step_id"] = int(step_id)
     return event
 
 
@@ -155,10 +174,19 @@ def log_permission_decision(
     tool_name: str | None = None,
     metadata: dict | None = None,
     thread_id: str = "system",
+    run_id: str | None = None,
+    step_id: int | None = None,
 ) -> None:
     """通过现有 JSONL logger 写入 permission_decision audit event。"""
     try:
-        event = build_permission_decision_event(request, result, tool_name=tool_name, metadata=metadata)
+        event = build_permission_decision_event(
+            request,
+            result,
+            tool_name=tool_name,
+            metadata=metadata,
+            run_id=run_id,
+            step_id=step_id,
+        )
         audit_logger.log_event(thread_id, event["event_type"], **event)
     except Exception as e:
         print(f"[Logger Error] permission decision audit failed: {e}")

@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.theme import Theme
 from rich.panel import Panel
 from rich.text import Text
+from rich.markup import escape
 from rich.align import Align
 from rich import box
 from datetime import datetime
@@ -126,6 +127,34 @@ def _format_timestamp(data: dict) -> str:
         return dt_local.strftime("%H:%M:%S")
     except Exception:
         return ts_str.split("T")[-1][:8] if ts_str else "--:--:--"
+
+
+def _safe_trace_text(value: object, max_length: int) -> str:
+    """只保留 trace 展示所需的低风险字符，避免 Rich markup 注入。"""
+    text = str(value or "")
+    safe = "".join(ch for ch in text if ch.isalnum() or ch in "-_")
+    return safe[:max_length]
+
+
+def format_trace_prefix(event: dict) -> str:
+    """生成短 trace 前缀，兼容没有 run_id/step_id 的旧日志。"""
+    parts = []
+    run_id = event.get("run_id")
+    step_id = event.get("step_id")
+    if run_id:
+        safe_run_id = _safe_trace_text(run_id, 8)
+        if safe_run_id:
+            parts.append(f"run={safe_run_id}")
+    if step_id is not None:
+        safe_step_id = _safe_trace_text(step_id, 12)
+        if safe_step_id:
+            parts.append(f"step={safe_step_id}")
+    return f"[{' '.join(parts)}] " if parts else ""
+
+
+def format_trace_prefix_for_markup(event: dict) -> str:
+    """生成可安全插入 Rich markup 字符串的 trace 前缀。"""
+    return escape(format_trace_prefix(event))
 
 
 def _safe_permission_target(target: object) -> str:
@@ -250,7 +279,8 @@ def render_event(line: str | dict):
 
     event = data.get("event") or data.get("event_type") or "unknown"
     ts = _format_timestamp(data)
-    prefix = f"[timestamp][ {ts} ][/timestamp] "
+    safe_ts = escape(ts)
+    prefix = f"[timestamp][ {safe_ts} ][/timestamp] {format_trace_prefix_for_markup(data)}"
 
     if event == "llm_input":
         count = data.get("message_count", 0)
@@ -262,14 +292,14 @@ def render_event(line: str | dict):
             f"[bold white] ● 使用工具: [/bold white][bold color(141)]{tool_name}[/bold color(141)]\n"
             f"{format_tool_call_event(data)}"
         )
-        console.print(Panel(content, title=f"✦ 意图决断 [ {ts} ]", title_align="left", border_style="color(141)", width=60))
+        console.print(Panel(content, title=f"✦ 意图决断 [ {safe_ts} ]", title_align="left", border_style="color(141)", width=60))
 
     elif event == "tool_result":
         tool_name = data.get("tool", "unknown")
         result = str(data.get("result_summary", ""))
         display_result = result[:300] + "\n...[截断]..." if len(result) > 300 else result
         content = f"[bold white] ● 执行结果: [/bold white][bold cyan]{tool_name}[/bold cyan]\n{display_result}"
-        console.print(Panel(content, title=f"✦ 环境回传 [ {ts} ]", title_align="left", border_style="cyan", width=60))
+        console.print(Panel(content, title=f"✦ 环境回传 [ {safe_ts} ]", title_align="left", border_style="cyan", width=60))
 
     elif event == "system_action":
         action = data.get("content", "")
