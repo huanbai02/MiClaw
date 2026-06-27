@@ -198,6 +198,32 @@ def run_monitor(
     except ImportError as e:
         console.print(f"[bold red]启动失败：找不到监视器模块！[/bold red]\n[dim]请确保 monitor.py 和 cli.py 在同一目录下。\n报错信息: {e}[/dim]")
 
+@app.command("logs")
+def logs_command(
+    tail: bool = typer.Option(False, "--tail", help="显示最近的 JSONL log event。"),
+    lines: int = typer.Option(20, "--lines", min=1, help="显示最近 N 条非空 log event。"),
+    log_file: Optional[str] = typer.Option(None, "--log-file", help="指定要读取的 JSONL log 文件。"),
+):
+    """查看最近的 MiClaw JSONL log event。"""
+    if not tail:
+        console.print("请使用 `miclaw logs --tail` 查看最近日志。", markup=False)
+        return
+
+    import entry.monitor as miclaw_monitor
+
+    resolved_log_file = miclaw_monitor.resolve_monitor_log_file(log_file)
+    if not resolved_log_file.exists():
+        console.print(f"No log file found at {resolved_log_file}", markup=False)
+        return
+
+    events = miclaw_monitor.tail_log_events(resolved_log_file, lines=lines)
+    if not events:
+        console.print(f"No log events found at {resolved_log_file}", markup=False)
+        return
+
+    for event in events:
+        console.print(miclaw_monitor.format_log_event_for_cli(event), markup=False)
+
 def main():
     app()
 

@@ -118,6 +118,23 @@ def read_jsonl_events(filepath: str | Path) -> list[dict]:
     return events
 
 
+def tail_log_events(filepath: str | Path, lines: int = 20) -> list[dict]:
+    """读取最后 N 条非空 JSONL event；坏行转换为 parse_error。"""
+    path = Path(filepath)
+    if not path.exists() or lines <= 0:
+        return []
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw_lines = [line for line in f if line.strip()]
+
+    events = []
+    for line in raw_lines[-lines:]:
+        event = parse_event_line(line)
+        if event is not None:
+            events.append(event)
+    return events
+
+
 def _format_timestamp(data: dict) -> str:
     ts_str = str(data.get("ts") or data.get("timestamp") or "")
     try:
@@ -269,6 +286,31 @@ def format_tool_call_event(event: dict) -> str:
     """生成不泄漏 raw args 的 tool_call 摘要。"""
     tool_name = str(event.get("tool") or "unknown")
     return f"TOOL CALL {tool_name} [args={format_tool_args_summary(event.get('args', {}))}]"
+
+
+def format_log_event_for_cli(event: dict) -> str:
+    """生成适合 `miclaw logs --tail` 的安全单行摘要。"""
+    event_type = str(event.get("event") or event.get("event_type") or "unknown")
+    trace_prefix = format_trace_prefix(event)
+
+    if event_type == "permission_decision":
+        return f"{trace_prefix}{format_permission_decision_event(event)}"
+    if event_type == "tool_call":
+        return f"{trace_prefix}{format_tool_call_event(event)}"
+    if event_type == "tool_result":
+        tool_name = str(event.get("tool") or "unknown")
+        return f"{trace_prefix}TOOL RESULT {tool_name}"
+    if event_type == "llm_input":
+        return f"{trace_prefix}LLM INPUT message_count={event.get('message_count', 0)}"
+    if event_type == "ai_message":
+        content = str(event.get("content") or "")
+        return f"{trace_prefix}AI MESSAGE content_present={bool(content)} content_length={len(content)}"
+    if event_type == "system_action":
+        content = str(event.get("content") or "")
+        return f"{trace_prefix}SYSTEM ACTION content_present={bool(content)} content_length={len(content)}"
+    if event_type == "parse_error":
+        return f"{trace_prefix}[parse_error] malformed JSONL line skipped"
+    return f"{trace_prefix}EVENT {event_type}"
 
 
 def render_event(line: str | dict):

@@ -74,12 +74,19 @@ miclaw run
 miclaw monitor
 ```
 
+快速查看最近 JSONL 日志事件：
+
+```bash
+miclaw logs --tail --lines 20
+```
+
 查看命令帮助：
 
 ```bash
 miclaw --help
 miclaw config --help
 miclaw monitor --help
+miclaw logs --tail --help
 ```
 
 ## 核心能力
@@ -91,6 +98,7 @@ miclaw monitor --help
 - 定时任务：后台心跳循环检查 `tasks.json`，到点后把任务投递给智能体处理。
 - 技能加载：从 `SKILL.md` 动态加载工具说明，支持懒加载和缓存刷新。
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
+- 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
 
 ## 项目结构
 
@@ -122,6 +130,7 @@ python -m ruff check .
 miclaw --help
 miclaw config --help
 miclaw monitor --help
+miclaw logs --tail --help
 ```
 
 ## 使用建议
