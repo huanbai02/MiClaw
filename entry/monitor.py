@@ -135,6 +135,31 @@ def tail_log_events(filepath: str | Path, lines: int = 20) -> list[dict]:
     return events
 
 
+def _numeric_step_id(event: dict) -> int | None:
+    """解析可排序的 numeric step_id；不可解析时返回 None。"""
+    try:
+        return int(event.get("step_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def get_trace_events(events: list[dict], run_id: str) -> list[dict]:
+    """筛选指定 run_id 的 event，并按 numeric step_id 稳定排序。"""
+    requested_run_id = str(run_id)
+    matched = [event for event in events if "run_id" in event and str(event.get("run_id")) == requested_run_id]
+
+    indexed = list(enumerate(matched))
+
+    def sort_key(item: tuple[int, dict]) -> tuple[int, int, int]:
+        index, event = item
+        step_id = _numeric_step_id(event)
+        if step_id is None:
+            return (1, index, index)
+        return (0, step_id, index)
+
+    return [event for _, event in sorted(indexed, key=sort_key)]
+
+
 def _format_timestamp(data: dict) -> str:
     ts_str = str(data.get("ts") or data.get("timestamp") or "")
     try:

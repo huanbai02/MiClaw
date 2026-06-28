@@ -80,6 +80,12 @@ miclaw monitor
 miclaw logs --tail --lines 20
 ```
 
+按 `run_id` 查看同一次运行的 trace 事件：
+
+```bash
+miclaw trace <run_id>
+```
+
 查看命令帮助：
 
 ```bash
@@ -87,6 +93,7 @@ miclaw --help
 miclaw config --help
 miclaw monitor --help
 miclaw logs --tail --help
+miclaw trace --help
 ```
 
 ## 核心能力
@@ -99,6 +106,7 @@ miclaw logs --tail --help
 - 技能加载：从 `SKILL.md` 动态加载工具说明，支持懒加载和缓存刷新。
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
 - 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
+- Trace 查看：通过 `miclaw trace <run_id>` 查看指定运行的安全事件摘要。
 
 ## 项目结构
 
@@ -131,6 +139,7 @@ miclaw --help
 miclaw config --help
 miclaw monitor --help
 miclaw logs --tail --help
+miclaw trace --help
 ```
 
 ## 使用建议

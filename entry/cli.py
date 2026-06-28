@@ -224,6 +224,29 @@ def logs_command(
     for event in events:
         console.print(miclaw_monitor.format_log_event_for_cli(event), markup=False)
 
+@app.command("trace")
+def trace_command(
+    run_id: str = typer.Argument(..., help="要查看的 run_id。"),
+    log_file: Optional[str] = typer.Option(None, "--log-file", help="指定要读取的 JSONL log 文件。"),
+):
+    """查看指定 run_id 的 MiClaw trace event。"""
+    import entry.monitor as miclaw_monitor
+
+    resolved_log_file = miclaw_monitor.resolve_monitor_log_file(log_file)
+    if not resolved_log_file.exists():
+        console.print(f"No log file found at {resolved_log_file}", markup=False)
+        return
+
+    events = miclaw_monitor.read_jsonl_events(resolved_log_file)
+    trace_events = miclaw_monitor.get_trace_events(events, run_id)
+    if not trace_events:
+        console.print(f"No events found for run_id {run_id}", markup=False)
+        return
+
+    console.print(f"Trace run={run_id}", markup=False)
+    for event in trace_events:
+        console.print(miclaw_monitor.format_log_event_for_cli(event), markup=False)
+
 def main():
     app()
 
