@@ -16,6 +16,7 @@ from miclaw.core.agent import create_agent_app
 from miclaw.core.config import DB_PATH
 from miclaw.core.bus import task_queue
 from miclaw.core.heartbeat import pacemaker_loop
+from miclaw.core.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -80,7 +81,7 @@ def cprint(text="", end="\n"):
     print_formatted_text(ANSI(str(text)), end=end)
 
 
-async def async_main():
+async def async_main(trace_context: TraceContext | None = None):
     print_banner()
     
     from dotenv import load_dotenv
@@ -93,6 +94,8 @@ async def async_main():
     async with AsyncSqliteSaver.from_conn_string(DB_PATH) as memory:
         app = create_agent_app(provider_name=current_provider, model_name=current_model, checkpointer=memory)
         config = {"configurable": {"thread_id": "local_geek_master"}}
+        if trace_context is not None:
+            config["configurable"]["run_id"] = trace_context.run_id
 
         class SpinnerState:
             action_words = [
@@ -245,7 +248,12 @@ async def async_main():
             heartbeat_worker.cancel()
 
 def main():
-    asyncio.run(async_main())
+    trace_context = TraceContext(run_id=new_run_id())
+    trace_token = set_current_trace_context(trace_context)
+    try:
+        asyncio.run(async_main(trace_context=trace_context))
+    finally:
+        reset_trace_context(trace_token)
 
 if __name__ == "__main__":
     main()

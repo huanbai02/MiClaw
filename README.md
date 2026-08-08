@@ -30,6 +30,12 @@ python -m pip install -e .
 miclaw config
 ```
 
+也可以先复制示例配置，再填入本地密钥：
+
+```bash
+cp .env.example .env
+```
+
 向导会写入项目根目录下的 `.env` 文件。常用配置项包括：
 
 ```env
@@ -68,12 +74,26 @@ miclaw run
 miclaw monitor
 ```
 
+快速查看最近 JSONL 日志事件：
+
+```bash
+miclaw logs --tail --lines 20
+```
+
+按 `run_id` 查看同一次运行的 trace 事件：
+
+```bash
+miclaw trace <run_id>
+```
+
 查看命令帮助：
 
 ```bash
 miclaw --help
 miclaw config --help
 miclaw monitor --help
+miclaw logs --tail --help
+miclaw trace --help
 ```
 
 ## 核心能力
@@ -85,6 +105,8 @@ miclaw monitor --help
 - 定时任务：后台心跳循环检查 `tasks.json`，到点后把任务投递给智能体处理。
 - 技能加载：从 `SKILL.md` 动态加载工具说明，支持懒加载和缓存刷新。
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
+- 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
+- Trace 查看：通过 `miclaw trace <run_id>` 查看指定运行的安全事件摘要。
 
 ## 项目结构
 
@@ -102,8 +124,12 @@ MiClaw/
 
 ## 测试
 
+CI 会单独安装 `ruff`；本地运行 lint 前可先执行 `python -m pip install ruff`。
+
 ```bash
 python -m pytest
+python -m compileall miclaw tests
+python -m ruff check .
 ```
 
 可在安装后额外验证入口命令：
@@ -112,6 +138,8 @@ python -m pytest
 miclaw --help
 miclaw config --help
 miclaw monitor --help
+miclaw logs --tail --help
+miclaw trace --help
 ```
 
 ## 使用建议
