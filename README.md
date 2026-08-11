@@ -76,7 +76,7 @@ miclaw run
 miclaw run --workspace /path/to/existing/project
 ```
 
-该 PROJECT root 仅在本次运行内有效，不会持久化；未提供时仍使用默认 `workspace/office/`。
+该 PROJECT root 仅在本次运行内有效，不会持久化；未提供时仍使用默认 `workspace/office/`。PROJECT 内的 low-risk 文件读取和列举默认允许，文件写入和 shell 执行仍需 confirmation 或匹配的 session grant。
 
 查看运行日志监控面板：
 

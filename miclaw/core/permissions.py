@@ -1,8 +1,7 @@
-"""MiClaw permission model skeleton。
+"""定义 MiClaw 工具共享的 permission 语言与保守默认策略。
 
-本模块只定义未来工具共享的 permission 语言与保守默认策略，当前不接入
-file、shell、network 或 MCP runtime。具体工具仍必须单独做 path、参数和
-sandbox 边界校验。
+本模块负责 capability、workspace scope、confirmation 与 session grant 的
+permission decision；具体工具仍必须单独执行 path、参数和 sandbox 边界校验。
 """
 
 from __future__ import annotations
@@ -11,6 +10,8 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
+
+from .workspace import WorkspaceScope
 
 
 class PermissionCapability(str, Enum):
@@ -185,6 +186,22 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
     capability = safe_request.capability
     risk_level = safe_request.risk_level
 
+    if "workspace_scope" in safe_request.metadata:
+        workspace_scope = _workspace_scope_from_request(safe_request)
+        if workspace_scope is None:
+            return deny("Unknown workspace scope is denied", risk_level)
+        if workspace_scope is WorkspaceScope.EXTERNAL:
+            return deny("External workspace access is denied", risk_level)
+
+    if capability in {
+        PermissionCapability.FILE_READ,
+        PermissionCapability.FILE_WRITE,
+        PermissionCapability.SHELL_EXEC,
+    }:
+        workspace_result = _evaluate_workspace_permission(safe_request)
+        if workspace_result is not None:
+            return workspace_result
+
     if capability is PermissionCapability.FILE_READ:
         if risk_level is RiskLevel.LOW:
             return allow("Low-risk file read is allowed by default policy", risk_level)
@@ -213,6 +230,44 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
         return ask("Memory write requires confirmation by default", risk_level)
 
     return deny("Unknown capability is denied by default", RiskLevel.HIGH)
+
+
+def _evaluate_workspace_permission(request: PermissionRequest) -> PermissionResult | None:
+    """评估 workspace-sensitive capability；OFFICE 返回 None 以复用既有策略。"""
+    scope = _workspace_scope_from_request(request)
+    if scope is None:
+        return deny("Missing or unknown workspace scope is denied", request.risk_level)
+    if scope is WorkspaceScope.EXTERNAL:
+        return deny("External workspace access is denied", request.risk_level)
+    if scope is WorkspaceScope.OFFICE:
+        return None
+
+    if request.capability is PermissionCapability.FILE_READ:
+        if request.operation not in {"read", "list"}:
+            return deny("Unknown project file read operation is denied", request.risk_level)
+        if request.risk_level is RiskLevel.LOW:
+            return allow("Low-risk project file read is allowed", request.risk_level)
+        return ask("Project file read above low risk requires confirmation", request.risk_level)
+
+    if request.capability is PermissionCapability.FILE_WRITE:
+        if request.operation != "write":
+            return deny("Unknown project file write operation is denied", request.risk_level)
+        return ask("Project file write requires confirmation", request.risk_level)
+
+    if request.operation != "execute":
+        return deny("Unknown project shell operation is denied", request.risk_level)
+    return ask("Project shell execution requires confirmation", request.risk_level)
+
+
+def _workspace_scope_from_request(request: PermissionRequest) -> WorkspaceScope | None:
+    """读取显式 workspace scope；缺失或非法值均 fail closed。"""
+    value = request.metadata.get("workspace_scope")
+    if isinstance(value, WorkspaceScope):
+        return value
+    try:
+        return WorkspaceScope(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def resolve_permission(

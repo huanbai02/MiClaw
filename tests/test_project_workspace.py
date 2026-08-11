@@ -19,11 +19,18 @@ from miclaw.core.permissions import (
     ask,
     deny,
     get_session_permission_grants,
+    reset_permission_confirmation_handler,
     reset_session_permission_grants,
     resolve_permission,
+    set_permission_confirmation_handler,
     set_session_permission_grants,
 )
-from miclaw.core.tools.sandbox_tools import execute_office_shell, read_office_file, write_office_file
+from miclaw.core.tools.sandbox_tools import (
+    execute_office_shell,
+    list_office_files,
+    read_office_file,
+    write_office_file,
+)
 from miclaw.core.workspace import (
     WorkspaceScope,
     get_active_project_root,
@@ -119,12 +126,46 @@ def test_default_workspace_remains_office(roots):
     assert root.scope is WorkspaceScope.OFFICE
 
 
-def test_project_relative_file_read_and_write_succeed(active_project):
-    result = write_office_file.invoke({"filepath": "nested/notes.txt", "content": "project", "mode": "w"})
+def test_project_relative_file_read_and_list_succeed(active_project):
+    nested = active_project / "nested"
+    nested.mkdir()
+    (nested / "notes.txt").write_text("project", encoding="utf-8")
+
+    assert read_office_file.invoke({"filepath": "nested/notes.txt"}) == "project"
+    assert "notes.txt" in list_office_files.invoke({"sub_dir": "nested"})
+
+
+def test_confirmed_project_write_can_execute(active_project):
+    confirmation_token = set_permission_confirmation_handler(
+        lambda request, result: PermissionDecision.ALLOW
+    )
+    try:
+        result = write_office_file.invoke(
+            {"filepath": "nested/notes.txt", "content": "project", "mode": "w"}
+        )
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
 
     assert "成功以 覆盖/新建 模式写入文件" in result
-    assert read_office_file.invoke({"filepath": "nested/notes.txt"}) == "project"
     assert (active_project / "nested" / "notes.txt").read_text(encoding="utf-8") == "project"
+
+
+@pytest.mark.parametrize("mode, content", [("w", "modified"), ("a", " appended")])
+def test_denied_project_write_does_not_modify_existing_file(active_project, mode, content):
+    existing = active_project / "existing.txt"
+    existing.write_text("original", encoding="utf-8")
+    confirmation_token = set_permission_confirmation_handler(
+        lambda request, result: PermissionDecision.DENY
+    )
+    try:
+        result = write_office_file.invoke(
+            {"filepath": "existing.txt", "content": content, "mode": mode}
+        )
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+
+    assert "Permission denied" in result
+    assert existing.read_text(encoding="utf-8") == "original"
 
 
 @pytest.mark.parametrize(
@@ -189,6 +230,48 @@ def test_safe_shell_uses_project_root_as_cwd(active_project, monkeypatch):
     assert calls[0][1]["cwd"] == str(active_project.resolve())
 
 
+def test_project_shell_asks_without_confirmation(active_project, monkeypatch):
+    monkeypatch.setattr(
+        sandbox_tools.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("ASK shell must not run without confirmation"),
+    )
+
+    result = execute_office_shell.invoke({"command": "echo hello"})
+
+    assert "Permission required" in result
+
+
+def test_project_shell_session_grant_is_reused_in_same_run(active_project, monkeypatch):
+    prompt_calls = []
+    run_calls = []
+
+    def allow_session(request, result):
+        prompt_calls.append(request)
+        return PermissionConfirmationChoice.ALLOW_SESSION
+
+    monkeypatch.setattr(
+        sandbox_tools.subprocess,
+        "run",
+        lambda *args, **kwargs: (
+            run_calls.append(kwargs) or SimpleNamespace(returncode=0, stdout="hello", stderr="")
+        ),
+    )
+    grants_token = set_session_permission_grants()
+    confirmation_token = set_permission_confirmation_handler(allow_session)
+    try:
+        first = execute_office_shell.invoke({"command": "echo first"})
+        second = execute_office_shell.invoke({"command": "echo second"})
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(grants_token)
+
+    assert "hello" in first
+    assert "hello" in second
+    assert len(prompt_calls) == 1
+    assert len(run_calls) == 2
+
+
 def test_critical_shell_command_is_blocked_with_project_grant(active_project, monkeypatch):
     grants_token = set_session_permission_grants()
     try:
@@ -235,9 +318,7 @@ def test_project_operation_passes_relative_scope_to_permission_and_audit(active_
     assert str(active_project) not in event_text
 
 
-def test_project_ask_stays_blocked_without_confirmation(active_project, monkeypatch):
-    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", lambda request: ask("confirmation required"))
-
+def test_project_ask_stays_blocked_without_confirmation(active_project):
     result = write_office_file.invoke({"filepath": "blocked.txt", "content": "blocked", "mode": "w"})
 
     assert "Permission required" in result

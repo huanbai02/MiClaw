@@ -14,6 +14,7 @@ from miclaw.core.permissions import (
     evaluate_permission,
     resolve_permission,
 )
+from miclaw.core.workspace import WorkspaceScope
 
 
 def request_for(capability, risk_level=RiskLevel.LOW):
@@ -24,7 +25,19 @@ def request_for(capability, risk_level=RiskLevel.LOW):
         arguments={"path": "example.txt"},
         reason="test request",
         risk_level=risk_level,
-        metadata={"source": "test"},
+        metadata={"source": "test", "workspace_scope": WorkspaceScope.OFFICE.value},
+    )
+
+
+def project_request(capability, operation, risk_level=RiskLevel.LOW):
+    """创建显式 PROJECT scope 的 policy request。"""
+    return PermissionRequest(
+        capability=capability,
+        operation=operation,
+        target="example.txt",
+        reason="test project policy",
+        risk_level=risk_level,
+        metadata={"workspace_scope": WorkspaceScope.PROJECT.value},
     )
 
 
@@ -101,7 +114,7 @@ def test_permission_request_serialization_returns_json_friendly_strings():
         "arguments": {"path": "example.txt"},
         "reason": "test request",
         "risk_level": "low",
-        "metadata": {"source": "test"},
+        "metadata": {"source": "test", "workspace_scope": "office"},
     }
     json.dumps(serialized)
 
@@ -143,6 +156,69 @@ def test_invalid_result_decision_defaults_to_deny():
 
     assert result.decision is PermissionDecision.DENY
     assert result.requires_confirmation is False
+
+
+@pytest.mark.parametrize("operation", ["read", "list"])
+def test_project_low_risk_read_operations_return_allow(operation):
+    result = evaluate_permission(project_request(PermissionCapability.FILE_READ, operation))
+
+    assert result.decision is PermissionDecision.ALLOW
+
+
+def test_project_write_returns_ask():
+    result = evaluate_permission(project_request(PermissionCapability.FILE_WRITE, "write"))
+
+    assert result.decision is PermissionDecision.ASK
+    assert result.requires_confirmation is True
+
+
+def test_project_shell_returns_ask():
+    result = evaluate_permission(
+        project_request(PermissionCapability.SHELL_EXEC, "execute", RiskLevel.MEDIUM)
+    )
+
+    assert result.decision is PermissionDecision.ASK
+
+
+@pytest.mark.parametrize("scope", [WorkspaceScope.EXTERNAL.value, "future_scope", "", None])
+def test_unavailable_or_malformed_workspace_scope_fails_closed(scope):
+    request = PermissionRequest(
+        capability=PermissionCapability.FILE_READ,
+        operation="read",
+        target="example.txt",
+        risk_level=RiskLevel.LOW,
+        metadata={"workspace_scope": scope} if scope is not None else {},
+    )
+
+    result = evaluate_permission(request)
+
+    assert result.decision is PermissionDecision.DENY
+    assert result.requires_confirmation is False
+
+
+def test_external_scope_denies_otherwise_allowed_capability():
+    request = PermissionRequest(
+        capability=PermissionCapability.MEMORY_READ,
+        operation="read",
+        risk_level=RiskLevel.LOW,
+        metadata={"workspace_scope": WorkspaceScope.EXTERNAL.value},
+    )
+
+    assert evaluate_permission(request).decision is PermissionDecision.DENY
+
+
+@pytest.mark.parametrize(
+    "capability, operation",
+    [
+        (PermissionCapability.FILE_READ, "delete"),
+        (PermissionCapability.FILE_WRITE, "read"),
+        (PermissionCapability.SHELL_EXEC, "inspect"),
+    ],
+)
+def test_unknown_project_workspace_operations_fail_closed(capability, operation):
+    result = evaluate_permission(project_request(capability, operation))
+
+    assert result.decision is PermissionDecision.DENY
 
 
 def test_resolve_ask_without_confirmation_handler_stays_blocked():
