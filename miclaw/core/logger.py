@@ -131,6 +131,7 @@ _SAFE_METADATA_KEYS = {
     "command_length",
     "shell_risk_level",
     "blocked_by_shell_safety",
+    "workspace_scope",
 }
 
 
