@@ -205,6 +205,13 @@ def build_permission_confirmation_event(
     """构建不包含原始参数的 permission_confirmation audit event。"""
     safe_metadata = _safe_permission_metadata(metadata or {})
     final_decision = _json_safe_value(getattr(final_result, "decision", "deny"))
+    result_metadata = dict(getattr(final_result, "metadata", {}) or {})
+    confirmation_source = result_metadata.get("confirmation_source")
+    if confirmation_source not in {"interactive", "session_grant"}:
+        confirmation_source = "handler"
+    confirmation_choice = result_metadata.get("confirmation_choice")
+    if confirmation_choice not in {"allow_once", "allow_session", "deny"}:
+        confirmation_choice = final_decision
     event = {
         "event_type": "permission_confirmation",
         "tool_name": tool_name or safe_metadata.get("tool_name") or "unknown",
@@ -213,6 +220,8 @@ def build_permission_confirmation_event(
         "target": str(getattr(request, "target", "") or ""),
         "policy_decision": _json_safe_value(getattr(policy_result, "decision", "ask")),
         "confirmation_decision": final_decision,
+        "confirmation_choice": confirmation_choice,
+        "source": confirmation_source,
         "final_decision": final_decision,
         "risk_level": _json_safe_value(getattr(policy_result, "risk_level", "low")),
         "reason": str(getattr(final_result, "reason", "") or ""),

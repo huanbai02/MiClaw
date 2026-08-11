@@ -34,6 +34,14 @@ class PermissionDecision(str, Enum):
     ASK = "ask"
 
 
+class PermissionConfirmationChoice(str, Enum):
+    """用户对 ASK permission 的临时确认选择。"""
+
+    ALLOW_ONCE = "allow_once"
+    ALLOW_SESSION = "allow_session"
+    DENY = "deny"
+
+
 class RiskLevel(str, Enum):
     """请求风险等级。"""
 
@@ -109,13 +117,43 @@ class PermissionResult:
 class PermissionConfirmationHandler(Protocol):
     """定义 ASK permission 的确认回调协议。"""
 
-    def __call__(self, request: PermissionRequest, result: PermissionResult) -> PermissionDecision:
-        """返回明确的 ALLOW 或 DENY；其他返回值会按 DENY 处理。"""
+    def __call__(
+        self,
+        request: PermissionRequest,
+        result: PermissionResult,
+    ) -> PermissionConfirmationChoice | PermissionDecision:
+        """返回确认选择；旧 handler 的 ALLOW/DENY 仍保持兼容。"""
         ...
+
+
+@dataclass(frozen=True)
+class SessionPermissionGrant:
+    """描述当前 interactive run 内可精确复用的 permission grant。"""
+
+    capability: PermissionCapability
+    operation: str
+    tool_name: str
+    target_scope: str
+    risk_level: RiskLevel
+
+    @classmethod
+    def from_request(cls, request: PermissionRequest) -> SessionPermissionGrant:
+        """从已校验的 PermissionRequest 构造精确 grant key。"""
+        return cls(
+            capability=request.capability,
+            operation=request.operation,
+            tool_name=str(request.metadata.get("tool_name") or ""),
+            target_scope=request.target,
+            risk_level=request.risk_level,
+        )
 
 
 _current_confirmation_handler: ContextVar[PermissionConfirmationHandler | None] = ContextVar(
     "miclaw_permission_confirmation_handler",
+    default=None,
+)
+_current_session_permission_grants: ContextVar[set[SessionPermissionGrant] | None] = ContextVar(
+    "miclaw_session_permission_grants",
     default=None,
 )
 
@@ -190,11 +228,24 @@ def resolve_permission(
     Returns:
         最终用于决定是否执行的 PermissionResult。
     """
-    if result.decision is not PermissionDecision.ASK or confirmation_handler is None:
+    if result.decision is not PermissionDecision.ASK:
+        return result
+
+    grants = get_session_permission_grants()
+    if grants is not None and SessionPermissionGrant.from_request(request) in grants:
+        return allow(
+            "Permission allowed by session grant",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+            confirmation_choice=PermissionConfirmationChoice.ALLOW_SESSION.value,
+            confirmation_source="session_grant",
+        )
+    if confirmation_handler is None:
         return result
 
     try:
-        confirmation_decision = confirmation_handler(request, result)
+        confirmation_choice = confirmation_handler(request, result)
     except Exception:
         return deny(
             "Permission confirmation failed closed",
@@ -203,7 +254,7 @@ def resolve_permission(
             confirmation_decision=PermissionDecision.DENY.value,
         )
 
-    if confirmation_decision is PermissionDecision.ALLOW:
+    if confirmation_choice is PermissionDecision.ALLOW:
         return allow(
             "Permission explicitly confirmed",
             result.risk_level,
@@ -211,16 +262,53 @@ def resolve_permission(
             confirmation_decision=PermissionDecision.ALLOW.value,
         )
 
+    if confirmation_choice is PermissionConfirmationChoice.ALLOW_ONCE:
+        return allow(
+            "Permission explicitly allowed once",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+            confirmation_choice=confirmation_choice.value,
+            confirmation_source="interactive",
+        )
+
+    if confirmation_choice is PermissionConfirmationChoice.ALLOW_SESSION:
+        if grants is None:
+            return deny(
+                "Session permission grant context is unavailable",
+                result.risk_level,
+                policy_decision=PermissionDecision.ASK.value,
+                confirmation_decision=PermissionDecision.DENY.value,
+                confirmation_choice=confirmation_choice.value,
+                confirmation_source="interactive",
+            )
+        grants.add(SessionPermissionGrant.from_request(request))
+        return allow(
+            "Permission allowed for this session",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+            confirmation_choice=confirmation_choice.value,
+            confirmation_source="interactive",
+        )
+
     reason = (
         "Permission confirmation denied"
-        if confirmation_decision is PermissionDecision.DENY
+        if confirmation_choice in {PermissionDecision.DENY, PermissionConfirmationChoice.DENY}
         else "Permission confirmation did not explicitly allow"
     )
+    confirmation_metadata = {}
+    if isinstance(confirmation_choice, PermissionConfirmationChoice):
+        confirmation_metadata = {
+            "confirmation_choice": confirmation_choice.value,
+            "confirmation_source": "interactive",
+        }
     return deny(
         reason,
         result.risk_level,
         policy_decision=PermissionDecision.ASK.value,
         confirmation_decision=PermissionDecision.DENY.value,
+        **confirmation_metadata,
     )
 
 
@@ -239,6 +327,21 @@ def set_permission_confirmation_handler(
 def reset_permission_confirmation_handler(token: Token[PermissionConfirmationHandler | None]) -> None:
     """恢复绑定前的 confirmation handler。"""
     _current_confirmation_handler.reset(token)
+
+
+def get_session_permission_grants() -> set[SessionPermissionGrant] | None:
+    """返回当前 interactive run 的内存 grant set；未绑定时返回 None。"""
+    return _current_session_permission_grants.get()
+
+
+def set_session_permission_grants() -> Token[set[SessionPermissionGrant] | None]:
+    """为当前 execution context 创建并绑定全新的空 session grant set。"""
+    return _current_session_permission_grants.set(set())
+
+
+def reset_session_permission_grants(token: Token[set[SessionPermissionGrant] | None]) -> None:
+    """清除当前 run 的 grants，并恢复先前 execution context。"""
+    _current_session_permission_grants.reset(token)
 
 
 def _coerce_capability(value: Any) -> PermissionCapability:

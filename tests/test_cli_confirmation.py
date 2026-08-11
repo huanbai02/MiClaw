@@ -7,6 +7,7 @@ import entry.cli as cli
 import miclaw.core.tools.sandbox_tools as sandbox_tools
 from miclaw.core.permissions import (
     PermissionCapability,
+    PermissionConfirmationChoice,
     PermissionDecision,
     PermissionRequest,
     RiskLevel,
@@ -14,9 +15,12 @@ from miclaw.core.permissions import (
     ask,
     deny,
     get_permission_confirmation_handler,
+    get_session_permission_grants,
     reset_permission_confirmation_handler,
+    reset_session_permission_grants,
     resolve_permission,
     set_permission_confirmation_handler,
+    set_session_permission_grants,
 )
 from miclaw.core.tools.sandbox_tools import execute_office_shell, write_office_file
 
@@ -61,11 +65,14 @@ def bind_cli_handler():
 @pytest.mark.parametrize(
     "prompt_result, expected",
     [
-        ("y", PermissionDecision.ALLOW),
-        ("YES", PermissionDecision.ALLOW),
-        ("n", PermissionDecision.DENY),
-        ("", PermissionDecision.DENY),
-        ("approve", PermissionDecision.DENY),
+        ("a", PermissionConfirmationChoice.ALLOW_ONCE),
+        ("y", PermissionConfirmationChoice.ALLOW_ONCE),
+        ("YES", PermissionConfirmationChoice.ALLOW_ONCE),
+        ("s", PermissionConfirmationChoice.ALLOW_SESSION),
+        ("session", PermissionConfirmationChoice.ALLOW_SESSION),
+        ("n", PermissionConfirmationChoice.DENY),
+        ("", PermissionConfirmationChoice.DENY),
+        ("approve", PermissionConfirmationChoice.DENY),
     ],
 )
 def test_cli_confirmation_requires_explicit_affirmative_input(monkeypatch, prompt_result, expected):
@@ -85,7 +92,36 @@ def test_cli_confirmation_prompt_failure_denies(monkeypatch, error):
 
     decision = cli.cli_permission_confirmation_handler(permission_request(), ask("confirmation required"))
 
-    assert decision is PermissionDecision.DENY
+    assert decision is PermissionConfirmationChoice.DENY
+
+
+@pytest.mark.parametrize(
+    "answer, expected_decision, expected_grants",
+    [
+        ("a", PermissionDecision.ALLOW, 0),
+        ("s", PermissionDecision.ALLOW, 1),
+        ("d", PermissionDecision.DENY, 0),
+    ],
+)
+def test_cli_confirmation_choices_control_session_grants(
+    monkeypatch,
+    answer,
+    expected_decision,
+    expected_grants,
+):
+    grants_token = set_session_permission_grants()
+    monkeypatch.setattr(cli.typer, "prompt", lambda *args, **kwargs: answer)
+    try:
+        result = resolve_permission(
+            permission_request(),
+            ask("confirmation required"),
+            cli.cli_permission_confirmation_handler,
+        )
+
+        assert result.decision is expected_decision
+        assert len(get_session_permission_grants()) == expected_grants
+    finally:
+        reset_session_permission_grants(grants_token)
 
 
 @pytest.mark.parametrize("policy_result", [allow("allowed"), deny("denied")])
@@ -173,9 +209,11 @@ def test_critical_shell_command_does_not_prompt_or_execute(office, monkeypatch, 
 
 def test_run_agent_binds_and_resets_confirmation_handler(monkeypatch):
     observed_handlers = []
+    observed_grants = []
 
     def fail_after_observing_handler():
         observed_handlers.append(get_permission_confirmation_handler())
+        observed_grants.append(get_session_permission_grants())
         raise RuntimeError("run stopped")
 
     monkeypatch.setattr(cli, "load_dotenv", lambda path: None)
@@ -190,4 +228,6 @@ def test_run_agent_binds_and_resets_confirmation_handler(monkeypatch):
         cli.run_agent()
 
     assert observed_handlers == [cli.cli_permission_confirmation_handler]
+    assert observed_grants == [set()]
     assert get_permission_confirmation_handler() is None
+    assert get_session_permission_grants() is None

@@ -13,11 +13,13 @@ import sys
 from miclaw.core.provider import get_provider
 from miclaw.core.permissions import (
     PermissionCapability,
-    PermissionDecision,
+    PermissionConfirmationChoice,
     PermissionRequest,
     PermissionResult,
     reset_permission_confirmation_handler,
+    reset_session_permission_grants,
     set_permission_confirmation_handler,
+    set_session_permission_grants,
 )
 from langchain_core.messages import HumanMessage
 
@@ -205,26 +207,31 @@ def format_permission_confirmation_prompt(request: PermissionRequest, result: Pe
         f"Risk: {result.risk_level.value}\n"
         f"Target: {_safe_permission_target(request)}\n"
         "Status: currently blocked pending confirmation\n"
-        "Allow this operation?"
+        "Choose: [a] Allow once, [s] Allow for this session, [d] Deny"
     )
 
 
 def cli_permission_confirmation_handler(
     request: PermissionRequest,
     result: PermissionResult,
-) -> PermissionDecision:
+) -> PermissionConfirmationChoice:
     """请求一次显式 CLI 确认；任何非明确同意或 prompt 异常都返回 DENY。"""
     try:
         answer = typer.prompt(
             format_permission_confirmation_prompt(request, result),
-            default="n",
+            default="d",
             show_default=True,
         )
     except (EOFError, KeyboardInterrupt):
-        return PermissionDecision.DENY
+        return PermissionConfirmationChoice.DENY
     except Exception:
-        return PermissionDecision.DENY
-    return PermissionDecision.ALLOW if str(answer).strip().lower() in {"y", "yes"} else PermissionDecision.DENY
+        return PermissionConfirmationChoice.DENY
+    normalized = str(answer).strip().lower()
+    if normalized in {"a", "allow", "once", "y", "yes"}:
+        return PermissionConfirmationChoice.ALLOW_ONCE
+    if normalized in {"s", "session"}:
+        return PermissionConfirmationChoice.ALLOW_SESSION
+    return PermissionConfirmationChoice.DENY
 
 
 @app.command("run")
@@ -248,11 +255,13 @@ def run_agent():
         
     import entry.main as miclaw_main
 
+    grants_token = set_session_permission_grants()
     confirmation_token = set_permission_confirmation_handler(cli_permission_confirmation_handler)
     try:
         miclaw_main.main()
     finally:
         reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(grants_token)
 
 @app.command("monitor")
 def run_monitor(

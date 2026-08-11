@@ -68,7 +68,7 @@ export MICLAW_WORKSPACE=/path/to/workspace
 miclaw run
 ```
 
-运行期间遇到 `ASK` permission 时，CLI 只展示安全摘要并要求输入 `y`/`yes` 明确确认；默认值、拒绝、无效输入或 prompt 异常都会阻断操作。
+运行期间遇到 `ASK` permission 时，CLI 只展示安全摘要，并支持单次允许、当前 session 允许或拒绝；默认值、无效输入或 prompt 异常都会阻断操作。Session grant 仅保存在当前进程内存中，退出本次运行后自动清除。
 
 查看运行日志监控面板：
 

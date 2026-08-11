@@ -228,7 +228,10 @@ def _require_allowed_permission(request: PermissionRequest, metadata: dict) -> T
     )
     confirmation_handler = get_permission_confirmation_handler()
     final_result = resolve_permission(request, policy_result, confirmation_handler)
-    if policy_result.decision is PermissionDecision.ASK and confirmation_handler is not None:
+    confirmation_source = final_result.metadata.get("confirmation_source")
+    if policy_result.decision is PermissionDecision.ASK and (
+        confirmation_handler is not None or confirmation_source == "session_grant"
+    ):
         _permission_confirmation_audit_logger(
             request,
             policy_result,
