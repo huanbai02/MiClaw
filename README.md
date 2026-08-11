@@ -68,6 +68,8 @@ export MICLAW_WORKSPACE=/path/to/workspace
 miclaw run
 ```
 
+运行期间遇到 `ASK` permission 时，CLI 只展示安全摘要并要求输入 `y`/`yes` 明确确认；默认值、拒绝、无效输入或 prompt 异常都会阻断操作。
+
 查看运行日志监控面板：
 
 ```bash

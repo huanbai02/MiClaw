@@ -2,6 +2,7 @@ import os
 import typer
 import questionary
 import logging
+from pathlib import Path, PureWindowsPath
 from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
@@ -10,6 +11,14 @@ from dotenv import set_key, load_dotenv, unset_key
 import sys
 
 from miclaw.core.provider import get_provider
+from miclaw.core.permissions import (
+    PermissionCapability,
+    PermissionDecision,
+    PermissionRequest,
+    PermissionResult,
+    reset_permission_confirmation_handler,
+    set_permission_confirmation_handler,
+)
 from langchain_core.messages import HumanMessage
 
 ENTRY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -165,6 +174,59 @@ def _show_boot_error():
     ))
 
 
+def _safe_prompt_text(value, limit: int = 160) -> str:
+    """移除 terminal control character，并限制 prompt 字段长度。"""
+    text = str(value or "")
+    return "".join(char if char.isprintable() and char not in "\r\n" else "?" for char in text)[:limit]
+
+
+def _safe_permission_target(request: PermissionRequest) -> str:
+    """只展示已知 office scope 内的相对 target。"""
+    if request.capability is PermissionCapability.SHELL_EXEC:
+        return "office"
+    if request.capability not in {PermissionCapability.FILE_READ, PermissionCapability.FILE_WRITE}:
+        return "hidden"
+
+    target = str(request.target or "")
+    path = Path(target)
+    if path.is_absolute() or PureWindowsPath(target).drive or ".." in path.parts:
+        return "hidden"
+    return _safe_prompt_text(target or ".")
+
+
+def format_permission_confirmation_prompt(request: PermissionRequest, result: PermissionResult) -> str:
+    """使用固定安全字段构造 CLI confirmation prompt。"""
+    tool_name = _safe_prompt_text(request.metadata.get("tool_name") or "unknown_tool", limit=80)
+    return (
+        "Permission confirmation required\n"
+        f"Tool: {tool_name}\n"
+        f"Capability: {request.capability.value}\n"
+        f"Operation: {_safe_prompt_text(request.operation, limit=80)}\n"
+        f"Risk: {result.risk_level.value}\n"
+        f"Target: {_safe_permission_target(request)}\n"
+        "Status: currently blocked pending confirmation\n"
+        "Allow this operation?"
+    )
+
+
+def cli_permission_confirmation_handler(
+    request: PermissionRequest,
+    result: PermissionResult,
+) -> PermissionDecision:
+    """请求一次显式 CLI 确认；任何非明确同意或 prompt 异常都返回 DENY。"""
+    try:
+        answer = typer.prompt(
+            format_permission_confirmation_prompt(request, result),
+            default="n",
+            show_default=True,
+        )
+    except (EOFError, KeyboardInterrupt):
+        return PermissionDecision.DENY
+    except Exception:
+        return PermissionDecision.DENY
+    return PermissionDecision.ALLOW if str(answer).strip().lower() in {"y", "yes"} else PermissionDecision.DENY
+
+
 @app.command("run")
 def run_agent():
     load_dotenv(ENV_PATH)
@@ -185,7 +247,12 @@ def run_agent():
                 raise typer.Exit()
         
     import entry.main as miclaw_main
-    miclaw_main.main()
+
+    confirmation_token = set_permission_confirmation_handler(cli_permission_confirmation_handler)
+    try:
+        miclaw_main.main()
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
 
 @app.command("monitor")
 def run_monitor(

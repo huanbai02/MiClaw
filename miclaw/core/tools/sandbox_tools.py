@@ -262,6 +262,7 @@ def list_office_files(sub_dir: str = "") -> str:
                 target=target,
                 risk_level=RiskLevel.LOW,
                 reason="List files in office workspace",
+                metadata={"tool_name": "list_office_files"},
             ),
             metadata,
         )
@@ -322,6 +323,7 @@ def read_office_file(filepath: str) -> str:
                 target=target,
                 risk_level=RiskLevel.LOW,
                 reason="Read file from office workspace",
+                metadata={"tool_name": "read_office_file"},
             ),
             metadata,
         )
@@ -393,6 +395,7 @@ def write_office_file(filepath: str, content: str, mode: str = "w") -> str:
                 target=target,
                 risk_level=RiskLevel.LOW,
                 reason="Write file in office workspace",
+                metadata={"tool_name": "write_office_file"},
             ),
             metadata,
         )
@@ -506,6 +509,7 @@ def execute_office_shell(command: str) -> str:
                 arguments=safe_shell_metadata,
                 risk_level=RiskLevel.MEDIUM,
                 reason="Execute shell command in office workspace",
+                metadata={"tool_name": "execute_office_shell"},
             ),
             metadata,
         )
