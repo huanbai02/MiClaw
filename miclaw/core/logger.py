@@ -192,6 +192,66 @@ def log_permission_decision(
         print(f"[Logger Error] permission decision audit failed: {e}")
 
 
+def build_permission_confirmation_event(
+    request,
+    policy_result,
+    final_result,
+    *,
+    tool_name: str | None = None,
+    metadata: dict | None = None,
+    run_id: str | None = None,
+    step_id: int | None = None,
+) -> dict:
+    """构建不包含原始参数的 permission_confirmation audit event。"""
+    safe_metadata = _safe_permission_metadata(metadata or {})
+    final_decision = _json_safe_value(getattr(final_result, "decision", "deny"))
+    event = {
+        "event_type": "permission_confirmation",
+        "tool_name": tool_name or safe_metadata.get("tool_name") or "unknown",
+        "capability": _json_safe_value(getattr(request, "capability", "unknown")),
+        "operation": str(getattr(request, "operation", "") or ""),
+        "target": str(getattr(request, "target", "") or ""),
+        "policy_decision": _json_safe_value(getattr(policy_result, "decision", "ask")),
+        "confirmation_decision": final_decision,
+        "final_decision": final_decision,
+        "risk_level": _json_safe_value(getattr(policy_result, "risk_level", "low")),
+        "reason": str(getattr(final_result, "reason", "") or ""),
+        "metadata": safe_metadata,
+    }
+    if run_id is not None:
+        event["run_id"] = str(run_id)
+    if step_id is not None:
+        event["step_id"] = int(step_id)
+    return event
+
+
+def log_permission_confirmation(
+    request,
+    policy_result,
+    final_result,
+    *,
+    tool_name: str | None = None,
+    metadata: dict | None = None,
+    thread_id: str = "system",
+    run_id: str | None = None,
+    step_id: int | None = None,
+) -> None:
+    """通过现有 JSONL logger 写入 permission_confirmation audit event。"""
+    try:
+        event = build_permission_confirmation_event(
+            request,
+            policy_result,
+            final_result,
+            tool_name=tool_name,
+            metadata=metadata,
+            run_id=run_id,
+            step_id=step_id,
+        )
+        audit_logger.log_event(thread_id, event["event_type"], **event)
+    except Exception as e:
+        print(f"[Logger Error] permission confirmation audit failed: {e}")
+
+
 def _permission_error_type(decision: str) -> str:
     if decision == "deny":
         return "permission_denied"

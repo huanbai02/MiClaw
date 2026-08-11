@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from miclaw.core.permissions import (
     PermissionCapability,
     PermissionDecision,
@@ -10,6 +12,7 @@ from miclaw.core.permissions import (
     ask,
     deny,
     evaluate_permission,
+    resolve_permission,
 )
 
 
@@ -140,3 +143,66 @@ def test_invalid_result_decision_defaults_to_deny():
 
     assert result.decision is PermissionDecision.DENY
     assert result.requires_confirmation is False
+
+
+def test_resolve_ask_without_confirmation_handler_stays_blocked():
+    result = resolve_permission(request_for(PermissionCapability.SHELL_EXEC), ask("confirmation required"))
+
+    assert result.decision is PermissionDecision.ASK
+
+
+def test_resolve_ask_with_allow_confirmation_returns_allow():
+    result = resolve_permission(
+        request_for(PermissionCapability.SHELL_EXEC),
+        ask("confirmation required"),
+        lambda request, policy_result: PermissionDecision.ALLOW,
+    )
+
+    assert result.decision is PermissionDecision.ALLOW
+    assert result.metadata == {"policy_decision": "ask", "confirmation_decision": "allow"}
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        lambda request, policy_result: PermissionDecision.DENY,
+        lambda request, policy_result: PermissionDecision.ASK,
+        lambda request, policy_result: "allow",
+        lambda request, policy_result: None,
+    ],
+)
+def test_resolve_ask_fails_closed_for_non_allow_confirmation(handler):
+    result = resolve_permission(
+        request_for(PermissionCapability.SHELL_EXEC),
+        ask("confirmation required"),
+        handler,
+    )
+
+    assert result.decision is PermissionDecision.DENY
+
+
+def test_resolve_ask_fails_closed_when_confirmation_handler_raises():
+    def raising_handler(request, policy_result):
+        raise RuntimeError("confirmation unavailable")
+
+    result = resolve_permission(
+        request_for(PermissionCapability.SHELL_EXEC),
+        ask("confirmation required"),
+        raising_handler,
+    )
+
+    assert result.decision is PermissionDecision.DENY
+
+
+@pytest.mark.parametrize("policy_result", [allow("allowed"), deny("denied")])
+def test_resolve_non_ask_does_not_call_confirmation_handler(policy_result):
+    def unexpected_handler(request, result):
+        raise AssertionError("confirmation handler should not be called")
+
+    result = resolve_permission(
+        request_for(PermissionCapability.FILE_READ),
+        policy_result,
+        unexpected_handler,
+    )
+
+    assert result is policy_result

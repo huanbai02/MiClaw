@@ -15,7 +15,7 @@ from .result import (
     tool_success,
 )
 from ..config import OFFICE_DIR
-from ..logger import log_permission_decision
+from ..logger import log_permission_confirmation, log_permission_decision
 from ..permissions import (
     PermissionCapability,
     PermissionDecision,
@@ -23,11 +23,14 @@ from ..permissions import (
     PermissionResult,
     RiskLevel,
     evaluate_permission,
+    get_permission_confirmation_handler,
+    resolve_permission,
 )
 
 SYS_OS = platform.system()
 _permission_evaluator = evaluate_permission
 _permission_audit_logger = log_permission_decision
+_permission_confirmation_audit_logger = log_permission_confirmation
 SHELL_TIMEOUT_SECONDS = 10
 SHELL_OUTPUT_LIMIT = 4000
 
@@ -214,20 +217,30 @@ def _evaluate_office_permission(request: PermissionRequest) -> PermissionResult:
 
 
 def _require_allowed_permission(request: PermissionRequest, metadata: dict) -> ToolResult | None:
-    """仅 ALLOW 可继续执行；DENY/ASK 都返回阻断 ToolResult。"""
-    result = _evaluate_office_permission(request)
-    metadata["permission_decision"] = result.decision.value
+    """评估并解析 permission；只有最终 ALLOW 可继续执行。"""
+    policy_result = _evaluate_office_permission(request)
+    metadata["permission_decision"] = policy_result.decision.value
     _permission_audit_logger(
         request,
-        result,
+        policy_result,
         tool_name=str(metadata.get("tool_name") or "unknown"),
         metadata=metadata,
     )
-    if result.decision is PermissionDecision.ALLOW:
+    confirmation_handler = get_permission_confirmation_handler()
+    final_result = resolve_permission(request, policy_result, confirmation_handler)
+    if policy_result.decision is PermissionDecision.ASK and confirmation_handler is not None:
+        _permission_confirmation_audit_logger(
+            request,
+            policy_result,
+            final_result,
+            tool_name=str(metadata.get("tool_name") or "unknown"),
+            metadata=metadata,
+        )
+    if final_result.decision is PermissionDecision.ALLOW:
         return None
     return tool_permission_blocked(
-        _permission_block_message(result),
-        decision=result.decision.value,
+        _permission_block_message(final_result),
+        decision=final_result.decision.value,
         metadata=metadata,
     )
 

@@ -7,9 +7,10 @@ sandbox 边界校验。
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 
 
 class PermissionCapability(str, Enum):
@@ -105,6 +106,20 @@ class PermissionResult:
         }
 
 
+class PermissionConfirmationHandler(Protocol):
+    """定义 ASK permission 的确认回调协议。"""
+
+    def __call__(self, request: PermissionRequest, result: PermissionResult) -> PermissionDecision:
+        """返回明确的 ALLOW 或 DENY；其他返回值会按 DENY 处理。"""
+        ...
+
+
+_current_confirmation_handler: ContextVar[PermissionConfirmationHandler | None] = ContextVar(
+    "miclaw_permission_confirmation_handler",
+    default=None,
+)
+
+
 def allow(reason: str, risk_level: RiskLevel = RiskLevel.LOW, **metadata: Any) -> PermissionResult:
     """创建 ALLOW 结果。"""
     return PermissionResult(PermissionDecision.ALLOW, reason, risk_level, metadata)
@@ -158,6 +173,72 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
         return ask("Memory write requires confirmation by default", risk_level)
 
     return deny("Unknown capability is denied by default", RiskLevel.HIGH)
+
+
+def resolve_permission(
+    request: PermissionRequest,
+    result: PermissionResult,
+    confirmation_handler: PermissionConfirmationHandler | None = None,
+) -> PermissionResult:
+    """解析 ASK permission；任何非明确 ALLOW 的确认结果都 fail closed。
+
+    Args:
+        request: 原始 permission request。
+        result: permission policy 的原始结果。
+        confirmation_handler: 可选确认回调，仅在 policy 返回 ASK 时调用。
+
+    Returns:
+        最终用于决定是否执行的 PermissionResult。
+    """
+    if result.decision is not PermissionDecision.ASK or confirmation_handler is None:
+        return result
+
+    try:
+        confirmation_decision = confirmation_handler(request, result)
+    except Exception:
+        return deny(
+            "Permission confirmation failed closed",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.DENY.value,
+        )
+
+    if confirmation_decision is PermissionDecision.ALLOW:
+        return allow(
+            "Permission explicitly confirmed",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+        )
+
+    reason = (
+        "Permission confirmation denied"
+        if confirmation_decision is PermissionDecision.DENY
+        else "Permission confirmation did not explicitly allow"
+    )
+    return deny(
+        reason,
+        result.risk_level,
+        policy_decision=PermissionDecision.ASK.value,
+        confirmation_decision=PermissionDecision.DENY.value,
+    )
+
+
+def get_permission_confirmation_handler() -> PermissionConfirmationHandler | None:
+    """返回当前 execution context 绑定的 confirmation handler。"""
+    return _current_confirmation_handler.get()
+
+
+def set_permission_confirmation_handler(
+    handler: PermissionConfirmationHandler,
+) -> Token[PermissionConfirmationHandler | None]:
+    """为当前 execution context 绑定 handler，并返回可 reset 的 token。"""
+    return _current_confirmation_handler.set(handler)
+
+
+def reset_permission_confirmation_handler(token: Token[PermissionConfirmationHandler | None]) -> None:
+    """恢复绑定前的 confirmation handler。"""
+    _current_confirmation_handler.reset(token)
 
 
 def _coerce_capability(value: Any) -> PermissionCapability:
