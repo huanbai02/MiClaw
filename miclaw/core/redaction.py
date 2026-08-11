@@ -27,6 +27,12 @@ UNSUPPORTED_VALUE = "<unsupported value>"
 REDACTION_FAILED = "<redaction failed>"
 LARGE_INTEGER_OMITTED = "<large integer omitted>"
 
+_RESERVED_SUMMARY_KEY_NAMES = {
+    "redaction_error",
+    "redaction_limit",
+    "redaction_omitted_items",
+}
+
 _SENSITIVE_KEY_NAMES = {
     "password",
     "passwd",
@@ -228,19 +234,26 @@ def _redact_mapping(
     if depth >= max_depth:
         return {"_redaction_limit": DEPTH_LIMIT_REACHED}
 
-    result: dict[str, Any] = {}
-    processed = 0
+    items = []
+    has_omitted_items = False
     for key, value in data.items():
-        if processed >= max_collection_items:
-            result["_redaction_omitted_items"] = _omitted_item_count(data, processed)
+        if len(items) >= max_collection_items:
+            has_omitted_items = True
             break
-        processed += 1
+        items.append((key, value))
+
+    generated_summary_keys = _generated_summary_keys(items)
+    result: dict[str, Any] = {}
+    for key, value in items:
 
         key_text = _safe_key(key, max_string_length=MAX_KEY_LENGTH)
         if key_text == "<unreadable key>":
             result[key_text] = REDACTED
             continue
         detection_key = key if isinstance(key, str) else key_text
+        if _is_reserved_summary_key(detection_key, generated_summary_keys):
+            result.setdefault(key_text, REDACTED)
+            continue
         if is_sensitive_key(detection_key):
             result[key_text] = REDACTED
             continue
@@ -257,6 +270,8 @@ def _redact_mapping(
             max_collection_items=max_collection_items,
             max_depth=max_depth,
         )
+    if has_omitted_items:
+        result["_redaction_omitted_items"] = _omitted_item_count(data, len(items))
     return result
 
 
@@ -332,6 +347,29 @@ def _is_content_key(key: str) -> bool:
             or compact in _CONTENT_KEY_COMPACT_NAMES
             or normalized.endswith(_CONTENT_KEY_SUFFIXES)
         )
+    except Exception:
+        return True
+
+
+def _generated_summary_keys(items: list[tuple[Any, Any]]) -> set[str]:
+    """派生本次 mapping 中 sanitizer 实际可能生成的摘要 key。"""
+    generated = set()
+    for key, _value in items:
+        key_text = _safe_key(key, max_string_length=MAX_KEY_LENGTH)
+        if key_text == "<unreadable key>":
+            continue
+        detection_key = key if isinstance(key, str) else key_text
+        if _is_content_key(detection_key):
+            generated.add(_normalize_key(f"{key_text}_present"))
+            generated.add(_normalize_key(f"{key_text}_length"))
+    return generated
+
+
+def _is_reserved_summary_key(key: str, generated_summary_keys: set[str]) -> bool:
+    """阻止不可信 key 覆盖 sanitizer 生成的摘要字段。"""
+    try:
+        normalized = _normalize_key(str(key))
+        return normalized in _RESERVED_SUMMARY_KEY_NAMES or normalized in generated_summary_keys
     except Exception:
         return True
 

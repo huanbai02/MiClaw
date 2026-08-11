@@ -86,6 +86,65 @@ def test_dangerous_tool_content_fields_use_presence_and_length_only():
 
 
 @pytest.mark.parametrize(
+    "args",
+    [
+        dict(
+            [
+                ("command", "SECRET_COMMAND"),
+                ("command_present", "RAW_COLLISION_MARKER"),
+                ("command_length", "RAW_COLLISION_MARKER"),
+                ("content", "PRIVATE_FILE_CONTENT"),
+                ("content_present", "RAW_COLLISION_MARKER"),
+                ("content_length", "RAW_COLLISION_MARKER"),
+                ("token_count", 12),
+                ("latency_ms", 34),
+                ("queue_length", 5),
+                ("response_length", 89),
+                ("tool_name", "safe_tool"),
+                ("risk_level", "low"),
+                ("_redaction_error", "RAW_COLLISION_MARKER"),
+            ]
+        ),
+        dict(
+            [
+                ("content_length", "RAW_COLLISION_MARKER"),
+                ("content_present", "RAW_COLLISION_MARKER"),
+                ("content", "PRIVATE_FILE_CONTENT"),
+                ("command_length", "RAW_COLLISION_MARKER"),
+                ("command_present", "RAW_COLLISION_MARKER"),
+                ("command", "SECRET_COMMAND"),
+                ("token_count", 12),
+                ("latency_ms", 34),
+                ("queue_length", 5),
+                ("response_length", 89),
+                ("tool_name", "safe_tool"),
+                ("risk_level", "low"),
+                ("_redaction_error", "RAW_COLLISION_MARKER"),
+            ]
+        ),
+    ],
+)
+def test_generated_summary_fields_cannot_be_overwritten_by_untrusted_keys(args):
+    result = summarize_tool_args(args)
+    serialized = json.dumps(result)
+
+    assert result["command_present"] is True
+    assert result["command_length"] == len("SECRET_COMMAND")
+    assert result["content_present"] is True
+    assert result["content_length"] == len("PRIVATE_FILE_CONTENT")
+    assert result["_redaction_error"] == REDACTED
+    assert result["token_count"] == 12
+    assert result["latency_ms"] == 34
+    assert result["queue_length"] == 5
+    assert result["response_length"] == 89
+    assert result["tool_name"] == "safe_tool"
+    assert result["risk_level"] == "low"
+    assert "SECRET_COMMAND" not in serialized
+    assert "PRIVATE_FILE_CONTENT" not in serialized
+    assert "RAW_COLLISION_MARKER" not in serialized
+
+
+@pytest.mark.parametrize(
     "content",
     [
         "Authorization: Bearer SECRET_TOKEN",
@@ -347,6 +406,8 @@ def test_observability_metrics_are_not_over_redacted_or_summarized():
         "author": "MiClaw",
         "auth_status": "not_configured",
         "result_count": 4,
+        "queue_length": 5,
+        "response_length": 89,
         "latency_ms": 87,
         "model": "test-model",
         "tool_name": "read_office_file",

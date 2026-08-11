@@ -7,6 +7,7 @@ from .context import AgentState, trim_context_messages
 from .provider import get_provider
 from .tools.builtins import BUILTIN_TOOLS
 from .logger import audit_logger
+from .redaction import summarize_content, summarize_tool_args
 from .config import MEMORY_DIR
 from .skill_loader import load_dynamic_skills
 from langchain_core.runnables import RunnableConfig
@@ -52,7 +53,7 @@ def create_agent_app(
                     thread_id=thread_id,
                     event="tool_result",
                     tool = msg.name,
-                    result_summary = msg.content[:200]
+                    result_summary=summarize_content(msg.content),
                 )
 
         current_summary = state.get("summary", "")
@@ -144,13 +145,13 @@ def create_agent_app(
                     thread_id=thread_id,
                     event="tool_call",
                     tool=tool_call["name"],
-                    args=tool_call["args"]
+                    args=summarize_tool_args(tool_call["args"]),
                 )
         elif response.content:
             audit_logger.log_event(
                 thread_id=thread_id,
                 event="ai_message",
-                content=response.content
+                content=summarize_content(response.content),
             )
 
         if "messages" not in state_updates:
