@@ -12,6 +12,7 @@ from rich import box
 from datetime import datetime
 
 from miclaw.core.config import get_log_file_path
+from miclaw.core.redaction import REDACTED, sanitize_value, summarize_content, summarize_tool_args
 
 
 miclaw_theme = Theme({
@@ -178,6 +179,18 @@ def _safe_trace_text(value: object, max_length: int) -> str:
     return safe[:max_length]
 
 
+def _safe_display_text(value: object, fallback: str = "unknown") -> str:
+    """把任意 log value 转换为 bounded、JSON-friendly 的安全显示文本。"""
+    sanitized = sanitize_value(value)
+    if sanitized is None:
+        return fallback
+    if isinstance(sanitized, bool):
+        return str(sanitized).lower()
+    if isinstance(sanitized, (str, int, float)):
+        return str(sanitized)
+    return "<content omitted>"
+
+
 def format_trace_prefix(event: dict) -> str:
     """生成短 trace 前缀，兼容没有 run_id/step_id 的旧日志。"""
     parts = []
@@ -201,7 +214,7 @@ def format_trace_prefix_for_markup(event: dict) -> str:
 
 def _safe_permission_target(target: object) -> str:
     """只显示明显安全的 office-relative permission target。"""
-    target_text = str(target or "").strip()
+    target_text = _safe_display_text(target, fallback="").strip()
     if not target_text:
         return ""
     path = Path(target_text)
@@ -216,11 +229,11 @@ def _safe_permission_target(target: object) -> str:
 
 def format_permission_decision_event(event: dict) -> str:
     """生成不包含 raw metadata 的 permission_decision 摘要。"""
-    decision = str(event.get("decision") or "unknown").lower()
-    capability = str(event.get("capability") or "unknown")
-    operation = str(event.get("operation") or "").strip()
-    tool_name = str(event.get("tool_name") or "unknown_tool")
-    risk_level = str(event.get("risk_level") or "unknown")
+    decision = _safe_display_text(event.get("decision") or "unknown").lower()
+    capability = _safe_display_text(event.get("capability") or "unknown")
+    operation = _safe_display_text(event.get("operation") or "", fallback="").strip()
+    tool_name = _safe_display_text(event.get("tool_name") or "unknown_tool")
+    risk_level = _safe_display_text(event.get("risk_level") or "unknown")
     target = _safe_permission_target(event.get("target"))
     requires_confirmation = bool(event.get("requires_confirmation")) or decision == "ask"
 
@@ -258,47 +271,25 @@ def get_permission_decision_style(decision: object) -> str:
     return "warning"
 
 
-def _is_sensitive_arg_key(key: object) -> bool:
-    """判断 tool arg key 是否只能显示 presence/length。"""
-    key_text = str(key or "").lower()
-    sensitive_markers = (
-        "command",
-        "content",
-        "token",
-        "api_key",
-        "apikey",
-        "password",
-        "secret",
-        "authorization",
-        "bearer",
-        "key",
-    )
-    return any(marker in key_text for marker in sensitive_markers)
-
-
 def format_tool_args_summary(args: object) -> str:
-    """生成 tool_call 参数摘要，不显示 raw value。"""
+    """使用 redaction core 生成 tool_call 参数摘要，不显示 raw value。"""
     if not isinstance(args, dict):
+        return "args=unavailable"
+
+    sanitized = summarize_tool_args(args)
+    if "_redaction_error" in sanitized:
         return "args=unavailable"
 
     summary_parts = []
     sensitive_seen = False
-    for key, value in args.items():
+    for key, value in sanitized.items():
         key_text = str(key)
-        key_lower = key_text.lower()
-        value_text = "" if value is None else str(value)
-
-        if "command" in key_lower:
-            summary_parts.append(f"{key_text}_present=true")
-            summary_parts.append(f"{key_text}_length={len(value_text)}")
-        elif "content" in key_lower:
-            summary_parts.append(f"{key_text}_present=true")
-            summary_parts.append(f"{key_text}_length={len(value_text)}")
-        elif key_lower == "input" or "input" in key_lower:
-            summary_parts.append(f"{key_text}_present=true")
-            summary_parts.append(f"{key_text}_length={len(value_text)}")
-        elif _is_sensitive_arg_key(key_text):
+        if value == REDACTED:
             sensitive_seen = True
+        elif key_text.endswith(("_present", "_length")) or isinstance(value, (bool, int, float)):
+            summary_parts.append(f"{key_text}={_safe_display_text(value)}")
+        elif isinstance(value, (dict, list)):
+            summary_parts.append(f"{key_text}_present=true")
         else:
             summary_parts.append(key_text)
 
@@ -309,13 +300,32 @@ def format_tool_args_summary(args: object) -> str:
 
 def format_tool_call_event(event: dict) -> str:
     """生成不泄漏 raw args 的 tool_call 摘要。"""
-    tool_name = str(event.get("tool") or "unknown")
+    tool_name = _safe_display_text(event.get("tool") or "unknown")
     return f"TOOL CALL {tool_name} [args={format_tool_args_summary(event.get('args', {}))}]"
+
+
+def format_tool_result_event(event: dict) -> str:
+    """生成 legacy-safe 的 tool_result 摘要，不信任 result_summary。"""
+    tool_name = _safe_display_text(event.get("tool") or "unknown")
+    result = None
+    for field in ("result_summary", "result", "output", "stdout", "stderr", "content"):
+        if field in event:
+            result = event.get(field)
+            break
+    details = [summarize_content(result)]
+    if isinstance(event.get("success"), bool):
+        details.insert(0, f"success={str(event['success']).lower()}")
+    return f"TOOL RESULT {tool_name} [{' '.join(details)}]"
+
+
+def format_ai_message_event(event: dict) -> str:
+    """生成不展示 raw model content 的 ai_message 摘要。"""
+    return f"AI MESSAGE [{summarize_content(event.get('content'))}]"
 
 
 def format_log_event_for_cli(event: dict) -> str:
     """生成适合 `miclaw logs --tail` 的安全单行摘要。"""
-    event_type = str(event.get("event") or event.get("event_type") or "unknown")
+    event_type = _safe_display_text(event.get("event") or event.get("event_type") or "unknown")
     trace_prefix = format_trace_prefix(event)
 
     if event_type == "permission_decision":
@@ -323,16 +333,14 @@ def format_log_event_for_cli(event: dict) -> str:
     if event_type == "tool_call":
         return f"{trace_prefix}{format_tool_call_event(event)}"
     if event_type == "tool_result":
-        tool_name = str(event.get("tool") or "unknown")
-        return f"{trace_prefix}TOOL RESULT {tool_name}"
+        return f"{trace_prefix}{format_tool_result_event(event)}"
     if event_type == "llm_input":
-        return f"{trace_prefix}LLM INPUT message_count={event.get('message_count', 0)}"
+        message_count = _safe_display_text(event.get("message_count", 0))
+        return f"{trace_prefix}LLM INPUT message_count={message_count}"
     if event_type == "ai_message":
-        content = str(event.get("content") or "")
-        return f"{trace_prefix}AI MESSAGE content_present={bool(content)} content_length={len(content)}"
+        return f"{trace_prefix}{format_ai_message_event(event)}"
     if event_type == "system_action":
-        content = str(event.get("content") or "")
-        return f"{trace_prefix}SYSTEM ACTION content_present={bool(content)} content_length={len(content)}"
+        return f"{trace_prefix}SYSTEM ACTION [{summarize_content(event.get('content'))}]"
     if event_type == "parse_error":
         return f"{trace_prefix}[parse_error] malformed JSONL line skipped"
     return f"{trace_prefix}EVENT {event_type}"
@@ -343,45 +351,56 @@ def render_event(line: str | dict):
     data = parse_event_line(line) if isinstance(line, str) else line
     if not data:
         return
+    if not isinstance(data, dict):
+        data = {"event": "parse_error"}
 
-    event = data.get("event") or data.get("event_type") or "unknown"
+    event = _safe_display_text(data.get("event") or data.get("event_type") or "unknown")
     ts = _format_timestamp(data)
     safe_ts = escape(ts)
-    prefix = f"[timestamp][ {safe_ts} ][/timestamp] {format_trace_prefix_for_markup(data)}"
+    trace_prefix = format_trace_prefix_for_markup(data)
+    prefix = f"[timestamp][ {safe_ts} ][/timestamp] {trace_prefix}"
 
     if event == "llm_input":
-        count = data.get("message_count", 0)
+        count = escape(_safe_display_text(data.get("message_count", 0)))
         console.print(f"{prefix}[llm_input]🧠 神经元唤醒：发送了 {count} 条上下文记忆...[/llm_input]")
 
     elif event == "tool_call":
-        tool_name = data.get("tool", "unknown")
+        tool_name = escape(_safe_display_text(data.get("tool") or "unknown"))
+        tool_call = escape(format_tool_call_event(data))
         content = (
-            f"[bold white] ● 使用工具: [/bold white][bold color(141)]{tool_name}[/bold color(141)]\n"
-            f"{format_tool_call_event(data)}"
+            f"{trace_prefix}[bold white] ● 使用工具: [/bold white]"
+            f"[bold color(141)]{tool_name}[/bold color(141)]\n"
+            f"{tool_call}"
         )
         console.print(Panel(content, title=f"✦ 意图决断 [ {safe_ts} ]", title_align="left", border_style="color(141)", width=60))
 
     elif event == "tool_result":
-        tool_name = data.get("tool", "unknown")
-        result = str(data.get("result_summary", ""))
-        display_result = result[:300] + "\n...[截断]..." if len(result) > 300 else result
-        content = f"[bold white] ● 执行结果: [/bold white][bold cyan]{tool_name}[/bold cyan]\n{display_result}"
+        tool_name = escape(_safe_display_text(data.get("tool") or "unknown"))
+        safe_result = escape(format_tool_result_event(data))
+        content = (
+            f"{trace_prefix}[bold white] ● 执行结果: [/bold white]"
+            f"[bold cyan]{tool_name}[/bold cyan]\n{safe_result}"
+        )
         console.print(Panel(content, title=f"✦ 环境回传 [ {safe_ts} ]", title_align="left", border_style="cyan", width=60))
 
+    elif event == "ai_message":
+        console.print(f"{prefix}[ai_message]✦ {escape(format_ai_message_event(data))}[/ai_message]")
+
     elif event == "system_action":
-        action = data.get("content", "")
+        action = escape(summarize_content(data.get("content")))
         console.print(f"{prefix}[warning]✦ 底层状态机：{action}[/warning]")
 
     elif event == "permission_decision":
         decision = str(data.get("decision") or "").lower()
         style = get_permission_decision_style(decision)
-        console.print(f"{prefix}[{style}]✦ {format_permission_decision_event(data)}[/{style}]")
+        permission = escape(format_permission_decision_event(data))
+        console.print(f"{prefix}[{style}]✦ {permission}[/{style}]")
 
     elif event == "parse_error":
-        console.print(f"{prefix}[error]✦ 日志解析失败：{data.get('error', 'unknown error')}[/error]")
+        console.print(f"{prefix}[error]✦ 日志解析失败：malformed JSONL line[/error]")
 
     else:
-        console.print(f"{prefix}[info]✦ Event: {event}[/info]")
+        console.print(f"{prefix}[info]✦ Event: {escape(event)}[/info]")
 
 
 def main(log_file: str | Path | None = None):
