@@ -134,6 +134,7 @@ class SessionPermissionGrant:
     operation: str
     tool_name: str
     target_scope: str
+    workspace_scope: str
     risk_level: RiskLevel
 
     @classmethod
@@ -144,6 +145,7 @@ class SessionPermissionGrant:
             operation=request.operation,
             tool_name=str(request.metadata.get("tool_name") or ""),
             target_scope=request.target,
+            workspace_scope=str(request.metadata.get("workspace_scope") or "office"),
             risk_level=request.risk_level,
         )
 

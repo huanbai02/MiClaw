@@ -3,7 +3,7 @@ import typer
 import questionary
 import logging
 from pathlib import Path, PureWindowsPath
-from typing import Optional
+from typing import Annotated, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
@@ -21,6 +21,7 @@ from miclaw.core.permissions import (
     set_permission_confirmation_handler,
     set_session_permission_grants,
 )
+from miclaw.core.workspace import reset_active_project_root, set_active_project_root
 from langchain_core.messages import HumanMessage
 
 ENTRY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -183,9 +184,9 @@ def _safe_prompt_text(value, limit: int = 160) -> str:
 
 
 def _safe_permission_target(request: PermissionRequest) -> str:
-    """只展示已知 office scope 内的相对 target。"""
+    """只展示已知 active workspace scope 内的相对 target。"""
     if request.capability is PermissionCapability.SHELL_EXEC:
-        return "office"
+        return _safe_workspace_scope(request)
     if request.capability not in {PermissionCapability.FILE_READ, PermissionCapability.FILE_WRITE}:
         return "hidden"
 
@@ -194,6 +195,12 @@ def _safe_permission_target(request: PermissionRequest) -> str:
     if path.is_absolute() or PureWindowsPath(target).drive or ".." in path.parts:
         return "hidden"
     return _safe_prompt_text(target or ".")
+
+
+def _safe_workspace_scope(request: PermissionRequest) -> str:
+    """只返回当前 CLI 支持展示的 workspace scope。"""
+    scope = str(request.metadata.get("workspace_scope") or "office")
+    return scope if scope in {"office", "project"} else "hidden"
 
 
 def format_permission_confirmation_prompt(request: PermissionRequest, result: PermissionResult) -> str:
@@ -205,6 +212,7 @@ def format_permission_confirmation_prompt(request: PermissionRequest, result: Pe
         f"Capability: {request.capability.value}\n"
         f"Operation: {_safe_prompt_text(request.operation, limit=80)}\n"
         f"Risk: {result.risk_level.value}\n"
+        f"Workspace: {_safe_workspace_scope(request)}\n"
         f"Target: {_safe_permission_target(request)}\n"
         "Status: currently blocked pending confirmation\n"
         "Choose: [a] Allow once, [s] Allow for this session, [d] Deny"
@@ -235,7 +243,12 @@ def cli_permission_confirmation_handler(
 
 
 @app.command("run")
-def run_agent():
+def run_agent(
+    workspace: Annotated[
+        Optional[str],
+        typer.Option(help="显式指定当前 run 使用的现有 PROJECT workspace directory。"),
+    ] = None,
+):
     load_dotenv(ENV_PATH)
     provider = os.getenv("DEFAULT_PROVIDER")
     model = os.getenv("DEFAULT_MODEL")
@@ -253,15 +266,25 @@ def run_agent():
                 _show_boot_error()
                 raise typer.Exit()
         
-    import entry.main as miclaw_main
+    project_token = None
+    if workspace is not None:
+        try:
+            project_token = set_active_project_root(workspace)
+        except ValueError as exc:
+            console.print(f"Invalid project workspace: {exc}", markup=False)
+            raise typer.Exit(code=2) from exc
 
     grants_token = set_session_permission_grants()
     confirmation_token = set_permission_confirmation_handler(cli_permission_confirmation_handler)
     try:
+        import entry.main as miclaw_main
+
         miclaw_main.main()
     finally:
         reset_permission_confirmation_handler(confirmation_token)
         reset_session_permission_grants(grants_token)
+        if project_token is not None:
+            reset_active_project_root(project_token)
 
 @app.command("monitor")
 def run_monitor(

@@ -70,6 +70,14 @@ miclaw run
 
 运行期间遇到 `ASK` permission 时，CLI 只展示安全摘要，并支持单次允许、当前 session 允许或拒绝；默认值、无效输入或 prompt 异常都会阻断操作。Session grant 仅保存在当前进程内存中，退出本次运行后自动清除。
 
+如需把当前 run 显式限制在一个现有项目目录，可使用：
+
+```bash
+miclaw run --workspace /path/to/existing/project
+```
+
+该 PROJECT root 仅在本次运行内有效，不会持久化；未提供时仍使用默认 `workspace/office/`。
+
 查看运行日志监控面板：
 
 ```bash
