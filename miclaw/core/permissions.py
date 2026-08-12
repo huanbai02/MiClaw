@@ -9,9 +9,15 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any, Protocol
 
 from .workspace import WorkspaceScope
+
+
+_MCP_TOOL_TARGET_PATTERN = re.compile(
+    r"^mcp::[A-Za-z0-9][A-Za-z0-9._-]{0,79}::[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+)
 
 
 class PermissionCapability(str, Enum):
@@ -219,7 +225,11 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
         return deny("Network access is denied by default", risk_level)
 
     if capability is PermissionCapability.MCP_TOOL:
-        return deny("MCP tool access is denied by default", risk_level)
+        if safe_request.operation != "invoke":
+            return deny("Unsupported MCP tool operation is denied", RiskLevel.HIGH)
+        if _MCP_TOOL_TARGET_PATTERN.fullmatch(safe_request.target) is None:
+            return deny("Invalid MCP tool identity is denied", RiskLevel.HIGH)
+        return ask("MCP tool invocation requires confirmation", RiskLevel.HIGH)
 
     if capability is PermissionCapability.MEMORY_READ:
         if risk_level is RiskLevel.LOW:

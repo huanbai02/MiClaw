@@ -189,6 +189,9 @@ def _safe_permission_target(request: PermissionRequest) -> str:
     """只展示已知 active workspace scope 内的相对 target。"""
     if request.capability is PermissionCapability.SHELL_EXEC:
         return _safe_workspace_scope(request)
+    if request.capability is PermissionCapability.MCP_TOOL:
+        target = str(request.target or "")
+        return _safe_prompt_text(target) if _mcp_prompt_identity_parts(target) else "hidden"
     if request.capability not in {PermissionCapability.FILE_READ, PermissionCapability.FILE_WRITE}:
         return "hidden"
 
@@ -201,8 +204,23 @@ def _safe_permission_target(request: PermissionRequest) -> str:
 
 def _safe_workspace_scope(request: PermissionRequest) -> str:
     """只返回当前 CLI 支持展示的 workspace scope。"""
+    if request.capability is PermissionCapability.MCP_TOOL:
+        identity = _mcp_prompt_identity_parts(str(request.target or ""))
+        return f"mcp:{identity[0]}" if identity else "hidden"
     scope = str(request.metadata.get("workspace_scope") or "office")
     return scope if scope in {"office", "project"} else "hidden"
+
+
+def _mcp_prompt_identity_parts(target: str) -> tuple[str, str] | None:
+    """只接受 permission policy 同形的 MCP qualified identity。"""
+    parts = target.split("::")
+    if len(parts) != 3 or parts[0] != "mcp":
+        return None
+    server_id, tool_name = parts[1:]
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    if not all(value and len(value) <= 80 and set(value) <= allowed for value in (server_id, tool_name)):
+        return None
+    return server_id, tool_name
 
 
 def format_permission_confirmation_prompt(request: PermissionRequest, result: PermissionResult) -> str:
