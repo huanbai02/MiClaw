@@ -54,16 +54,24 @@ class MCPToolDescriptor:
         object.__setattr__(self, "input_schema", _copy_input_schema(self.input_schema))
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> MCPToolDescriptor:
-        """从不可信 mapping 构造 descriptor，错误只返回稳定 code。"""
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        server_id: str | None = None,
+    ) -> MCPToolDescriptor:
+        """从不可信 wire mapping 和显式 source 构造 descriptor。"""
         if not isinstance(value, Mapping):
             raise MCPAdapterError("invalid_descriptor", "MCP tool descriptor must be a mapping")
         try:
+            mapped_server_id = value.get("server_id")
+            if server_id is not None and mapped_server_id is not None and server_id != mapped_server_id:
+                raise MCPAdapterError("conflicting_server_id", "server_id conflicts with descriptor source")
             return cls(
-                server_id=value.get("server_id"),
+                server_id=server_id if server_id is not None else mapped_server_id,
                 name=value.get("name"),
                 description=value.get("description", ""),
-                input_schema=value.get("input_schema"),
+                input_schema=_resolve_input_schema(value),
             )
         except MCPAdapterError:
             raise
@@ -108,11 +116,16 @@ class MiClawToolDescriptor:
         }
 
 
-def adapt_mcp_tool(descriptor: MCPToolDescriptor | Mapping[str, Any]) -> MiClawToolDescriptor:
+def adapt_mcp_tool(
+    descriptor: MCPToolDescriptor | Mapping[str, Any],
+    *,
+    server_id: str | None = None,
+) -> MiClawToolDescriptor:
     """把 MCP descriptor 转换为 MiClaw-compatible 非执行型 descriptor。
 
     Args:
-        descriptor: 已构造的 MCPToolDescriptor 或不可信 descriptor mapping。
+        descriptor: 已构造的 MCPToolDescriptor 或标准 MCP Tool mapping。
+        server_id: wire mapping 未携带来源时必须显式提供的 server identity。
 
     Returns:
         保留 qualified identity、description 和 JSON Schema 的 defensive copy。
@@ -120,7 +133,12 @@ def adapt_mcp_tool(descriptor: MCPToolDescriptor | Mapping[str, Any]) -> MiClawT
     Raises:
         MCPAdapterError: descriptor 无效或 schema 不安全/无界。
     """
-    source = descriptor if isinstance(descriptor, MCPToolDescriptor) else MCPToolDescriptor.from_mapping(descriptor)
+    if isinstance(descriptor, MCPToolDescriptor):
+        if server_id is not None and server_id != descriptor.server_id:
+            raise MCPAdapterError("conflicting_server_id", "server_id conflicts with descriptor source")
+        source = descriptor
+    else:
+        source = MCPToolDescriptor.from_mapping(descriptor, server_id=server_id)
     return MiClawToolDescriptor(
         name=source.qualified_name,
         description=source.description,
@@ -135,12 +153,14 @@ def adapt_mcp_tool(descriptor: MCPToolDescriptor | Mapping[str, Any]) -> MiClawT
 
 def adapt_mcp_tools(
     descriptors: Sequence[MCPToolDescriptor | Mapping[str, Any]],
+    *,
+    server_id: str | None = None,
 ) -> list[MiClawToolDescriptor]:
     """批量转换 MCP tools，并拒绝同一 qualified identity 的重复项。"""
     adapted = []
     identities = set()
     for descriptor in descriptors:
-        tool = adapt_mcp_tool(descriptor)
+        tool = adapt_mcp_tool(descriptor, server_id=server_id)
         if tool.name in identities:
             raise MCPAdapterError("duplicate_tool_identity", "Duplicate MCP tool identity")
         identities.add(tool.name)
@@ -174,6 +194,20 @@ def _sanitize_description(value: Any) -> str:
     return "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in sanitized)
 
 
+def _resolve_input_schema(value: Mapping[str, Any]) -> Any:
+    """解析 MCP wire inputSchema 与内部 input_schema alias，并拒绝冲突。"""
+    has_wire_schema = "inputSchema" in value
+    has_alias_schema = "input_schema" in value
+    if has_wire_schema and has_alias_schema:
+        # 标准 wire field 与兼容 alias 同时出现时语义不明确，统一 fail closed。
+        raise MCPAdapterError("conflicting_input_schema", "inputSchema conflicts with input_schema")
+    if has_wire_schema:
+        return value["inputSchema"]
+    if has_alias_schema:
+        return value["input_schema"]
+    raise MCPAdapterError("invalid_input_schema", "MCP tool descriptor is missing inputSchema")
+
+
 def _copy_input_schema(value: Any) -> dict[str, Any]:
     """复制并限定 JSON Schema；超界时拒绝而不截断业务语义。"""
     if not isinstance(value, Mapping):
@@ -189,7 +223,23 @@ def _copy_input_schema(value: Any) -> dict[str, Any]:
         raise MCPAdapterError("invalid_input_schema", "input_schema cannot be safely adapted") from None
     if len(encoded.encode("utf-8")) > MAX_SCHEMA_BYTES:
         raise MCPAdapterError("schema_too_large", "input_schema exceeds adapter bounds")
+    _validate_input_schema_shape(copied)
     return copied
+
+
+def _validate_input_schema_shape(schema: dict[str, Any]) -> None:
+    """执行 MCP Tool input schema 所需的最小 root boundary validation。"""
+    if schema.get("type") != "object":
+        raise MCPAdapterError("invalid_input_schema", "input_schema root type must be object")
+    properties = schema.get("properties")
+    if properties is not None and not isinstance(properties, dict):
+        raise MCPAdapterError("invalid_input_schema", "input_schema properties must be an object")
+    required = schema.get("required")
+    if required is not None and (
+        not isinstance(required, list)
+        or any(not isinstance(field, str) for field in required)
+    ):
+        raise MCPAdapterError("invalid_input_schema", "input_schema required must be a string array")
 
 
 def _copy_json_value(value: Any, *, depth: int, item_count: list[int]) -> Any:
