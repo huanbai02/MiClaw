@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from itertools import islice
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
@@ -8,6 +9,26 @@ from functools import lru_cache
 
 from .config import SKILLS_DIR
 from .tools.sandbox_tools import execute_office_shell
+
+
+_METADATA_PATTERNS = {
+    "name": re.compile(r"^name:\s*(.+)$", re.MULTILINE),
+    "description": re.compile(r"^description:\s*(.+)$", re.MULTILINE),
+}
+_EMPTY_METADATA_PATTERNS = {
+    field: re.compile(rf"^{field}:[ \t]*(?:''|\"\")?[ \t]*$", re.MULTILINE)
+    for field in _METADATA_PATTERNS
+}
+
+
+def _match_metadata_field(content: str, field: str) -> Optional[re.Match[str]]:
+    """按 runtime 语法匹配一个 Skill metadata 字段。"""
+    return _METADATA_PATTERNS[field].search(content)
+
+
+def _is_empty_metadata_field(content: str, field: str) -> bool:
+    """判断 runtime 语法下已声明但值为空的 metadata 字段。"""
+    return _EMPTY_METADATA_PATTERNS[field].search(content) is not None
 
 
 class DynamicSkillInput(BaseModel):
@@ -51,6 +72,19 @@ class LazySkillLoader:
         """
         with open(md_path, "r", encoding="utf-8") as f:
             return f.read()
+
+    def _read_metadata_prefix(self, md_path: str) -> str:
+        """读取 Skill metadata 所需的前 50 行，不加载完整正文。"""
+        with open(md_path, "r", encoding="utf-8") as f:
+            return "\n".join(islice(f, 50))
+
+    def _list_skill_directories(self) -> List[tuple[str, str]]:
+        """按名称返回现有 Skill directory，供 discovery 与 lint 共用。"""
+        return [
+            (item, os.path.join(SKILLS_DIR, item))
+            for item in sorted(os.listdir(SKILLS_DIR))
+            if os.path.isdir(os.path.join(SKILLS_DIR, item))
+        ]
     
     def _scan_skills(self, force_rescan: bool = False) -> List[Dict[str, Any]]:
         """
@@ -77,11 +111,7 @@ class LazySkillLoader:
             self._last_scan_time = current_time
             return []
         
-        for item in sorted(os.listdir(SKILLS_DIR)):
-            folder_path = os.path.join(SKILLS_DIR, item)
-            if not os.path.isdir(folder_path):
-                continue
-            
+        for item, folder_path in self._list_skill_directories():
             md_path = os.path.join(folder_path, "SKILL.md")
             if not os.path.exists(md_path):
                 md_path = os.path.join(folder_path, "README.md")
@@ -123,18 +153,10 @@ class LazySkillLoader:
             包含 name 和 description 的字典
         """
         try:
-            with open(md_path, "r", encoding="utf-8") as f:
-                # 只读取前 50 行（通常元数据在文件开头）
-                lines = []
-                for i, line in enumerate(f):
-                    if i >= 50:
-                        break
-                    lines.append(line)
-                
-                content = "\n".join(lines)
+            content = self._read_metadata_prefix(md_path)
             
-            name_match = re.search(r"^name:\s*(.+)$", content, re.MULTILINE)
-            desc_match = re.search(r"^description:\s*(.+)$", content, re.MULTILINE)
+            name_match = _match_metadata_field(content, "name")
+            desc_match = _match_metadata_field(content, "description")
             
             raw_name = name_match.group(1).strip() if name_match else os.path.basename(os.path.dirname(md_path))
             tool_name = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_name)
@@ -239,6 +261,66 @@ class LazySkillLoader:
             }
             for skill in self._scan_skills(force_rescan=force_rescan)
         ]
+
+    def lint_skills(self) -> List[Dict[str, Any]]:
+        """检查 Skill 结构与基础 metadata，不改变 runtime cache。"""
+        if not os.path.exists(SKILLS_DIR):
+            return []
+        if not os.path.isdir(SKILLS_DIR):
+            return [{
+                "skill": "skills",
+                "status": "ERROR",
+                "issues": ["invalid_skills_directory"],
+            }]
+
+        try:
+            skill_directories = self._list_skill_directories()
+        except OSError:
+            return [{
+                "skill": "skills",
+                "status": "ERROR",
+                "issues": ["unreadable_skills_directory"],
+            }]
+
+        results = []
+        for item, folder_path in skill_directories:
+            md_path = os.path.join(folder_path, "SKILL.md")
+            if not os.path.exists(md_path):
+                results.append({"skill": item, "status": "ERROR", "issues": ["missing_skill_md"]})
+                continue
+            if not os.path.isfile(md_path) or os.path.islink(md_path):
+                results.append({"skill": item, "status": "ERROR", "issues": ["invalid_skill_md"]})
+                continue
+
+            try:
+                content = self._read_metadata_prefix(md_path)
+            except UnicodeDecodeError:
+                results.append({"skill": item, "status": "ERROR", "issues": ["invalid_encoding"]})
+                continue
+            except OSError:
+                results.append({"skill": item, "status": "ERROR", "issues": ["unreadable_metadata"]})
+                continue
+
+            issues = []
+            name_match = _match_metadata_field(content, "name")
+            description_match = _match_metadata_field(content, "description")
+            if _is_empty_metadata_field(content, "name"):
+                issues.append(("ERROR", "empty_name"))
+            elif name_match is None:
+                issues.append(("ERROR", "missing_name"))
+            if _is_empty_metadata_field(content, "description"):
+                issues.append(("WARNING", "empty_description"))
+            elif description_match is None:
+                issues.append(("WARNING", "missing_description"))
+
+            status = "ERROR" if any(level == "ERROR" for level, _ in issues) else "WARNING" if issues else "OK"
+            results.append({
+                "skill": item,
+                "status": status,
+                "issues": [code for _, code in issues],
+            })
+
+        return results
     
     def clear_cache(self):
         """清除所有缓存"""
@@ -300,6 +382,11 @@ def list_skill_metadata(force_rescan: bool = False) -> List[Dict[str, str]]:
         按 Skill name 排序的 metadata 列表。
     """
     return _lazy_loader.list_metadata(force_rescan=force_rescan)
+
+
+def lint_skills() -> List[Dict[str, Any]]:
+    """返回当前 workspace 的 Skill lint 结果，不触发完整正文加载。"""
+    return _lazy_loader.lint_skills()
 
 
 def clear_skill_cache():

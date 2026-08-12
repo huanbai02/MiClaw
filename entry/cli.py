@@ -323,6 +323,37 @@ def list_skills_command():
         description = " ".join(str(skill.get("description") or "unknown").split())[:160]
         console.print(f"{name:<24} {description}", markup=False)
 
+
+@skills_app.command("lint")
+def lint_skills_command():
+    """静态检查当前 workspace 中 Skill 的结构和基础 metadata。"""
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    with redirect_stdout(StringIO()):
+        from miclaw.core.skill_loader import lint_skills
+
+    results = lint_skills()
+    if not results:
+        console.print("No skills found.", markup=False)
+        return
+
+    console.print("Skill lint results", markup=False)
+    console.print("", markup=False)
+    for result in results:
+        skill = str(result["skill"])[:40]
+        status = str(result["status"])
+        issues = ", ".join(result["issues"])
+        console.print(f"{skill:<24} {status:<7} {issues}", markup=False)
+
+    valid = sum(result["status"] == "OK" for result in results)
+    warnings = sum(result["status"] == "WARNING" for result in results)
+    errors = sum(result["status"] == "ERROR" for result in results)
+    console.print("", markup=False)
+    console.print(f"{valid} valid, {warnings} warning, {errors} error", markup=False)
+    if errors:
+        raise typer.Exit(code=1)
+
 @app.command("logs")
 def logs_command(
     tail: bool = typer.Option(False, "--tail", help="显示最近的 JSONL log event。"),

@@ -102,6 +102,12 @@ miclaw trace <run_id>
 miclaw skills list
 ```
 
+静态检查 Skill 结构和基础 metadata：
+
+```bash
+miclaw skills lint
+```
+
 查看命令帮助：
 
 ```bash
@@ -112,6 +118,7 @@ miclaw logs --tail --help
 miclaw trace --help
 miclaw skills --help
 miclaw skills list --help
+miclaw skills lint --help
 ```
 
 ## 核心能力
@@ -160,6 +167,7 @@ miclaw logs --tail --help
 miclaw trace --help
 miclaw skills --help
 miclaw skills list --help
+miclaw skills lint --help
 ```
 
 ## 使用建议
