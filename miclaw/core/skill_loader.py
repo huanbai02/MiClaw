@@ -101,7 +101,7 @@ class LazySkillLoader:
                         **metadata
                     })
             except Exception as e:
-                print(f" [警告] 扫描技能 {item} 失败: {e}")
+                print(f" [警告] 扫描 Skill 失败: {item} ({type(e).__name__})")
         
         skills.sort(key=lambda skill: (skill["name"], skill["folder"]))
         self._skill_registry = skills
@@ -149,7 +149,8 @@ class LazySkillLoader:
                 "description": raw_desc
             }
         except Exception as e:
-            print(f" [警告] 提取元数据失败 {md_path}: {e}")
+            skill_name = os.path.basename(os.path.dirname(md_path)) or "unknown"
+            print(f" [警告] 提取 Skill metadata 失败: {skill_name} ({type(e).__name__})")
             return None
     
     def _create_lazy_tool(self, skill_info: Dict[str, Any]) -> StructuredTool:
@@ -221,6 +222,23 @@ class LazySkillLoader:
     def get_tool_count(self) -> int:
         """获取技能数量（不触发加载）"""
         return len(self._scan_skills())
+
+    def list_metadata(self, force_rescan: bool = False) -> List[Dict[str, str]]:
+        """返回 Skill 列表所需的 metadata 副本，不加载完整正文。
+
+        Args:
+            force_rescan: 是否忽略 metadata TTL cache 并重新扫描。
+
+        Returns:
+            仅包含 name 和 description 的 metadata 列表。
+        """
+        return [
+            {
+                "name": str(skill["name"]),
+                "description": str(skill["description"]),
+            }
+            for skill in self._scan_skills(force_rescan=force_rescan)
+        ]
     
     def clear_cache(self):
         """清除所有缓存"""
@@ -270,6 +288,18 @@ def get_skill_count() -> int:
         技能总数
     """
     return _lazy_loader.get_tool_count()
+
+
+def list_skill_metadata(force_rescan: bool = False) -> List[Dict[str, str]]:
+    """列出已发现 Skill 的轻量 metadata，不触发完整正文加载。
+
+    Args:
+        force_rescan: 是否忽略 metadata TTL cache 并重新扫描。
+
+    Returns:
+        按 Skill name 排序的 metadata 列表。
+    """
+    return _lazy_loader.list_metadata(force_rescan=force_rescan)
 
 
 def clear_skill_cache():

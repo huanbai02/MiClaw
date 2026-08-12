@@ -33,6 +33,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 app = typer.Typer(help="MiClaw - 极客专属的赛博智能终端")
+skills_app = typer.Typer(help="查看当前 workspace 中发现的 Skill。", no_args_is_help=True)
+app.add_typer(skills_app, name="skills")
 console = Console()
 
 miclaw_style = questionary.Style([
@@ -296,6 +298,30 @@ def run_monitor(
         miclaw_monitor.main(log_file=log_file)
     except ImportError as e:
         console.print(f"[bold red]启动失败：找不到监视器模块！[/bold red]\n[dim]请确保 monitor.py 和 cli.py 在同一目录下。\n报错信息: {e}[/dim]")
+
+
+@skills_app.command("list")
+def list_skills_command():
+    """列出当前 workspace 中已发现的 Skill metadata。"""
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    # config 初始化仍会输出绝对 workspace path，此处仅隔离 import side effect。
+    with redirect_stdout(StringIO()):
+        from miclaw.core.skill_loader import list_skill_metadata
+
+    skills = list_skill_metadata()
+    if not skills:
+        console.print("No skills found.", markup=False)
+        return
+
+    console.print(f"Available skills: {len(skills)}", markup=False)
+    console.print("", markup=False)
+    console.print(f"{'NAME':<24} DESCRIPTION", markup=False)
+    for skill in skills:
+        name = str(skill.get("name") or "unknown")[:40]
+        description = " ".join(str(skill.get("description") or "unknown").split())[:160]
+        console.print(f"{name:<24} {description}", markup=False)
 
 @app.command("logs")
 def logs_command(

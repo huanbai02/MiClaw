@@ -96,6 +96,12 @@ miclaw logs --tail --lines 20
 miclaw trace <run_id>
 ```
 
+查看当前 workspace 中发现的 Skill metadata：
+
+```bash
+miclaw skills list
+```
+
 查看命令帮助：
 
 ```bash
@@ -104,6 +110,8 @@ miclaw config --help
 miclaw monitor --help
 miclaw logs --tail --help
 miclaw trace --help
+miclaw skills --help
+miclaw skills list --help
 ```
 
 ## 核心能力
@@ -150,6 +158,8 @@ miclaw config --help
 miclaw monitor --help
 miclaw logs --tail --help
 miclaw trace --help
+miclaw skills --help
+miclaw skills list --help
 ```
 
 ## 使用建议
