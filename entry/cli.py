@@ -331,9 +331,9 @@ def lint_skills_command():
     from io import StringIO
 
     with redirect_stdout(StringIO()):
-        from miclaw.core.skill_loader import lint_skills
+        from miclaw.core.skill_loader import validate_skills
 
-    results = lint_skills()
+    results = validate_skills()
     if not results:
         console.print("No skills found.", markup=False)
         return
@@ -341,14 +341,14 @@ def lint_skills_command():
     console.print("Skill lint results", markup=False)
     console.print("", markup=False)
     for result in results:
-        skill = str(result["skill"])[:40]
-        status = str(result["status"])
-        issues = ", ".join(result["issues"])
+        skill = result.skill[:40]
+        status = result.status
+        issues = ", ".join(issue.code for issue in result.issues)
         console.print(f"{skill:<24} {status:<7} {issues}", markup=False)
 
-    valid = sum(result["status"] == "OK" for result in results)
-    warnings = sum(result["status"] == "WARNING" for result in results)
-    errors = sum(result["status"] == "ERROR" for result in results)
+    valid = sum(result.status == "OK" for result in results)
+    warnings = sum(result.status == "WARNING" for result in results)
+    errors = sum(result.status == "ERROR" for result in results)
     console.print("", markup=False)
     console.print(f"{valid} valid, {warnings} warning, {errors} error", markup=False)
     if errors:
