@@ -168,6 +168,11 @@ def adapt_mcp_tools(
     return adapted
 
 
+def validate_mcp_server_id(value: Any) -> str:
+    """复用 adapter identity 规则校验 MCP server_id。"""
+    return _validate_identity_part(value, "server_id")
+
+
 def _validate_identity_part(value: Any, field_name: str) -> str:
     """校验 server/tool identity 的最小安全字符集和长度。"""
     if not isinstance(value, str):
