@@ -3,19 +3,45 @@
 import os
 from pathlib import Path
 import sys
+from typing import Literal
 
 import anyio
 from mcp.server import MCPServer
 from mcp.types import ImageContent
+from pydantic import BaseModel
 
 
 server = MCPServer("miclaw-pr30-test")
+
+
+class SearchOptions(BaseModel):
+    """用于验证 nested JSON Schema 保留。"""
+
+    limit: int = 10
 
 
 @server.tool()
 def echo(text: str) -> str:
     """返回输入文本。"""
     return text
+
+
+@server.tool()
+def schema_echo(
+    query: str,
+    mode: Literal["fast", "safe"],
+    options: SearchOptions,
+    note: str | None = None,
+    config: str | None = None,
+) -> str:
+    """返回 schema 测试输入。"""
+    return f"{query}:{mode}:{options.limit}:{note or ''}:{config or ''}"
+
+
+@server.tool()
+def secret_result(value: str) -> str:
+    """返回独立 secret marker，供 observability integration 测试。"""
+    return f"{value}:MCP_AGENT_RESULT_SECRET"
 
 
 @server.tool()
