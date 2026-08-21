@@ -26,3 +26,4 @@ langgraph-checkpoint-sqlite>=3.0.0
 
 # 工具支持
 pydantic>=2.0.0
+mcp>=2,<3

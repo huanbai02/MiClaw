@@ -9,7 +9,16 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.permissions import RiskLevel, allow, ask, deny, evaluate_permission
+from miclaw.core.permissions import (
+    PermissionDecision,
+    RiskLevel,
+    allow,
+    ask,
+    deny,
+    evaluate_permission,
+    reset_permission_confirmation_handler,
+    set_permission_confirmation_handler,
+)
 from miclaw.core.tools.sandbox_tools import (
     _get_safe_path,
     _resolve_existing_office_path,
@@ -28,7 +37,21 @@ def office(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "OFFICE_DIR", str(office_dir))
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", evaluate_permission)
     monkeypatch.setattr(sandbox_tools, "_permission_audit_logger", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sandbox_tools, "_permission_confirmation_audit_logger", lambda *args, **kwargs: None)
     return office_dir
+
+
+@pytest.fixture()
+def bind_confirmation_handler():
+    """绑定测试 handler，并在测试结束后恢复 execution context。"""
+    tokens = []
+
+    def bind(handler):
+        tokens.append(set_permission_confirmation_handler(handler))
+
+    yield bind
+    for token in reversed(tokens):
+        reset_permission_confirmation_handler(token)
 
 
 def allow_all_permissions(request):
@@ -214,6 +237,38 @@ def test_file_write_ask_policy_does_not_append_to_existing_file(office, monkeypa
     assert target.read_text(encoding="utf-8") == "original"
 
 
+def test_file_write_ask_with_denied_confirmation_does_not_modify_existing_file(
+    office,
+    monkeypatch,
+    bind_confirmation_handler,
+):
+    target = office / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", ask_all_permissions)
+    bind_confirmation_handler(lambda request, result: PermissionDecision.DENY)
+
+    result = write_office_file.invoke({"filepath": "existing.txt", "content": "modified", "mode": "w"})
+
+    assert "Permission denied: Permission confirmation denied" in result
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_file_write_ask_with_allowed_confirmation_modifies_office_file(
+    office,
+    monkeypatch,
+    bind_confirmation_handler,
+):
+    target = office / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", ask_all_permissions)
+    bind_confirmation_handler(lambda request, result: PermissionDecision.ALLOW)
+
+    result = write_office_file.invoke({"filepath": "existing.txt", "content": "modified", "mode": "w"})
+
+    assert "成功以 覆盖/新建 模式写入文件" in result
+    assert target.read_text(encoding="utf-8") == "modified"
+
+
 def test_permission_checks_do_not_bypass_path_validation_for_read(office, monkeypatch):
     def fail_if_called(request):
         raise AssertionError("permission evaluator should not run before path validation")
@@ -326,6 +381,59 @@ def test_execute_office_shell_deny_policy_does_not_run(mock_subprocess, office, 
     result = execute_office_shell.invoke({"command": "ls"})
 
     assert "Permission denied: test policy denies" in result
+    mock_subprocess.assert_not_called()
+
+
+@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+def test_execute_office_shell_ask_with_denied_confirmation_does_not_run(
+    mock_subprocess,
+    office,
+    monkeypatch,
+    bind_confirmation_handler,
+):
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", ask_all_permissions)
+    bind_confirmation_handler(lambda request, result: PermissionDecision.DENY)
+
+    result = execute_office_shell.invoke({"command": "echo hello"})
+
+    assert "Permission denied: Permission confirmation denied" in result
+    mock_subprocess.assert_not_called()
+
+
+@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+def test_execute_office_shell_ask_with_allowed_confirmation_runs_safe_command(
+    mock_subprocess,
+    office,
+    monkeypatch,
+    bind_confirmation_handler,
+):
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", ask_all_permissions)
+    bind_confirmation_handler(lambda request, result: PermissionDecision.ALLOW)
+    mock_subprocess.return_value.returncode = 0
+    mock_subprocess.return_value.stdout = "hello"
+    mock_subprocess.return_value.stderr = ""
+
+    result = execute_office_shell.invoke({"command": "echo hello"})
+
+    assert "hello" in result
+    mock_subprocess.assert_called_once()
+
+
+@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+def test_critical_shell_command_stays_blocked_after_allowed_confirmation(
+    mock_subprocess,
+    office,
+    monkeypatch,
+    bind_confirmation_handler,
+):
+    calls = []
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", ask_all_permissions)
+    bind_confirmation_handler(lambda request, result: calls.append(request) or PermissionDecision.ALLOW)
+
+    result = execute_office_shell.invoke({"command": "rm -rf /"})
+
+    assert "blocked by safety policy" in result
+    assert calls == []
     mock_subprocess.assert_not_called()
 
 

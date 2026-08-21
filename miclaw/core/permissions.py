@@ -1,15 +1,23 @@
-"""MiClaw permission model skeleton。
+"""定义 MiClaw 工具共享的 permission 语言与保守默认策略。
 
-本模块只定义未来工具共享的 permission 语言与保守默认策略，当前不接入
-file、shell、network 或 MCP runtime。具体工具仍必须单独做 path、参数和
-sandbox 边界校验。
+本模块负责 capability、workspace scope、confirmation 与 session grant 的
+permission decision；具体工具仍必须单独执行 path、参数和 sandbox 边界校验。
 """
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+import re
+from typing import Any, Protocol
+
+from .workspace import WorkspaceScope
+
+
+_MCP_TOOL_TARGET_PATTERN = re.compile(
+    r"^mcp::[A-Za-z0-9][A-Za-z0-9._-]{0,79}::[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+)
 
 
 class PermissionCapability(str, Enum):
@@ -31,6 +39,14 @@ class PermissionDecision(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
     ASK = "ask"
+
+
+class PermissionConfirmationChoice(str, Enum):
+    """用户对 ASK permission 的临时确认选择。"""
+
+    ALLOW_ONCE = "allow_once"
+    ALLOW_SESSION = "allow_session"
+    DENY = "deny"
 
 
 class RiskLevel(str, Enum):
@@ -105,6 +121,52 @@ class PermissionResult:
         }
 
 
+class PermissionConfirmationHandler(Protocol):
+    """定义 ASK permission 的确认回调协议。"""
+
+    def __call__(
+        self,
+        request: PermissionRequest,
+        result: PermissionResult,
+    ) -> PermissionConfirmationChoice | PermissionDecision:
+        """返回确认选择；旧 handler 的 ALLOW/DENY 仍保持兼容。"""
+        ...
+
+
+@dataclass(frozen=True)
+class SessionPermissionGrant:
+    """描述当前 interactive run 内可精确复用的 permission grant。"""
+
+    capability: PermissionCapability
+    operation: str
+    tool_name: str
+    target_scope: str
+    workspace_scope: str
+    risk_level: RiskLevel
+
+    @classmethod
+    def from_request(cls, request: PermissionRequest) -> SessionPermissionGrant:
+        """从已校验的 PermissionRequest 构造精确 grant key。"""
+        return cls(
+            capability=request.capability,
+            operation=request.operation,
+            tool_name=str(request.metadata.get("tool_name") or ""),
+            target_scope=request.target,
+            workspace_scope=str(request.metadata.get("workspace_scope") or "office"),
+            risk_level=request.risk_level,
+        )
+
+
+_current_confirmation_handler: ContextVar[PermissionConfirmationHandler | None] = ContextVar(
+    "miclaw_permission_confirmation_handler",
+    default=None,
+)
+_current_session_permission_grants: ContextVar[set[SessionPermissionGrant] | None] = ContextVar(
+    "miclaw_session_permission_grants",
+    default=None,
+)
+
+
 def allow(reason: str, risk_level: RiskLevel = RiskLevel.LOW, **metadata: Any) -> PermissionResult:
     """创建 ALLOW 结果。"""
     return PermissionResult(PermissionDecision.ALLOW, reason, risk_level, metadata)
@@ -130,6 +192,22 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
     capability = safe_request.capability
     risk_level = safe_request.risk_level
 
+    if "workspace_scope" in safe_request.metadata:
+        workspace_scope = _workspace_scope_from_request(safe_request)
+        if workspace_scope is None:
+            return deny("Unknown workspace scope is denied", risk_level)
+        if workspace_scope is WorkspaceScope.EXTERNAL:
+            return deny("External workspace access is denied", risk_level)
+
+    if capability in {
+        PermissionCapability.FILE_READ,
+        PermissionCapability.FILE_WRITE,
+        PermissionCapability.SHELL_EXEC,
+    }:
+        workspace_result = _evaluate_workspace_permission(safe_request)
+        if workspace_result is not None:
+            return workspace_result
+
     if capability is PermissionCapability.FILE_READ:
         if risk_level is RiskLevel.LOW:
             return allow("Low-risk file read is allowed by default policy", risk_level)
@@ -147,7 +225,11 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
         return deny("Network access is denied by default", risk_level)
 
     if capability is PermissionCapability.MCP_TOOL:
-        return deny("MCP tool access is denied by default", risk_level)
+        if safe_request.operation != "invoke":
+            return deny("Unsupported MCP tool operation is denied", RiskLevel.HIGH)
+        if _MCP_TOOL_TARGET_PATTERN.fullmatch(safe_request.target) is None:
+            return deny("Invalid MCP tool identity is denied", RiskLevel.HIGH)
+        return ask("MCP tool invocation requires confirmation", RiskLevel.HIGH)
 
     if capability is PermissionCapability.MEMORY_READ:
         if risk_level is RiskLevel.LOW:
@@ -158,6 +240,175 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
         return ask("Memory write requires confirmation by default", risk_level)
 
     return deny("Unknown capability is denied by default", RiskLevel.HIGH)
+
+
+def _evaluate_workspace_permission(request: PermissionRequest) -> PermissionResult | None:
+    """评估 workspace-sensitive capability；OFFICE 返回 None 以复用既有策略。"""
+    scope = _workspace_scope_from_request(request)
+    if scope is None:
+        return deny("Missing or unknown workspace scope is denied", request.risk_level)
+    if scope is WorkspaceScope.EXTERNAL:
+        return deny("External workspace access is denied", request.risk_level)
+    if scope is WorkspaceScope.OFFICE:
+        return None
+
+    if request.capability is PermissionCapability.FILE_READ:
+        if request.operation not in {"read", "list"}:
+            return deny("Unknown project file read operation is denied", request.risk_level)
+        if request.risk_level is RiskLevel.LOW:
+            return allow("Low-risk project file read is allowed", request.risk_level)
+        return ask("Project file read above low risk requires confirmation", request.risk_level)
+
+    if request.capability is PermissionCapability.FILE_WRITE:
+        if request.operation != "write":
+            return deny("Unknown project file write operation is denied", request.risk_level)
+        return ask("Project file write requires confirmation", request.risk_level)
+
+    if request.operation != "execute":
+        return deny("Unknown project shell operation is denied", request.risk_level)
+    return ask("Project shell execution requires confirmation", request.risk_level)
+
+
+def _workspace_scope_from_request(request: PermissionRequest) -> WorkspaceScope | None:
+    """读取显式 workspace scope；缺失或非法值均 fail closed。"""
+    value = request.metadata.get("workspace_scope")
+    if isinstance(value, WorkspaceScope):
+        return value
+    try:
+        return WorkspaceScope(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_permission(
+    request: PermissionRequest,
+    result: PermissionResult,
+    confirmation_handler: PermissionConfirmationHandler | None = None,
+) -> PermissionResult:
+    """解析 ASK permission；任何非明确 ALLOW 的确认结果都 fail closed。
+
+    Args:
+        request: 原始 permission request。
+        result: permission policy 的原始结果。
+        confirmation_handler: 可选确认回调，仅在 policy 返回 ASK 时调用。
+
+    Returns:
+        最终用于决定是否执行的 PermissionResult。
+    """
+    if result.decision is not PermissionDecision.ASK:
+        return result
+
+    grants = get_session_permission_grants()
+    if grants is not None and SessionPermissionGrant.from_request(request) in grants:
+        return allow(
+            "Permission allowed by session grant",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+            confirmation_choice=PermissionConfirmationChoice.ALLOW_SESSION.value,
+            confirmation_source="session_grant",
+        )
+    if confirmation_handler is None:
+        return result
+
+    try:
+        confirmation_choice = confirmation_handler(request, result)
+    except Exception:
+        return deny(
+            "Permission confirmation failed closed",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.DENY.value,
+        )
+
+    if confirmation_choice is PermissionDecision.ALLOW:
+        return allow(
+            "Permission explicitly confirmed",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+        )
+
+    if confirmation_choice is PermissionConfirmationChoice.ALLOW_ONCE:
+        return allow(
+            "Permission explicitly allowed once",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+            confirmation_choice=confirmation_choice.value,
+            confirmation_source="interactive",
+        )
+
+    if confirmation_choice is PermissionConfirmationChoice.ALLOW_SESSION:
+        if grants is None:
+            return deny(
+                "Session permission grant context is unavailable",
+                result.risk_level,
+                policy_decision=PermissionDecision.ASK.value,
+                confirmation_decision=PermissionDecision.DENY.value,
+                confirmation_choice=confirmation_choice.value,
+                confirmation_source="interactive",
+            )
+        grants.add(SessionPermissionGrant.from_request(request))
+        return allow(
+            "Permission allowed for this session",
+            result.risk_level,
+            policy_decision=PermissionDecision.ASK.value,
+            confirmation_decision=PermissionDecision.ALLOW.value,
+            confirmation_choice=confirmation_choice.value,
+            confirmation_source="interactive",
+        )
+
+    reason = (
+        "Permission confirmation denied"
+        if confirmation_choice in {PermissionDecision.DENY, PermissionConfirmationChoice.DENY}
+        else "Permission confirmation did not explicitly allow"
+    )
+    confirmation_metadata = {}
+    if isinstance(confirmation_choice, PermissionConfirmationChoice):
+        confirmation_metadata = {
+            "confirmation_choice": confirmation_choice.value,
+            "confirmation_source": "interactive",
+        }
+    return deny(
+        reason,
+        result.risk_level,
+        policy_decision=PermissionDecision.ASK.value,
+        confirmation_decision=PermissionDecision.DENY.value,
+        **confirmation_metadata,
+    )
+
+
+def get_permission_confirmation_handler() -> PermissionConfirmationHandler | None:
+    """返回当前 execution context 绑定的 confirmation handler。"""
+    return _current_confirmation_handler.get()
+
+
+def set_permission_confirmation_handler(
+    handler: PermissionConfirmationHandler,
+) -> Token[PermissionConfirmationHandler | None]:
+    """为当前 execution context 绑定 handler，并返回可 reset 的 token。"""
+    return _current_confirmation_handler.set(handler)
+
+
+def reset_permission_confirmation_handler(token: Token[PermissionConfirmationHandler | None]) -> None:
+    """恢复绑定前的 confirmation handler。"""
+    _current_confirmation_handler.reset(token)
+
+
+def get_session_permission_grants() -> set[SessionPermissionGrant] | None:
+    """返回当前 interactive run 的内存 grant set；未绑定时返回 None。"""
+    return _current_session_permission_grants.get()
+
+
+def set_session_permission_grants() -> Token[set[SessionPermissionGrant] | None]:
+    """为当前 execution context 创建并绑定全新的空 session grant set。"""
+    return _current_session_permission_grants.set(set())
+
+
+def reset_session_permission_grants(token: Token[set[SessionPermissionGrant] | None]) -> None:
+    """清除当前 run 的 grants，并恢复先前 execution context。"""
+    _current_session_permission_grants.reset(token)
 
 
 def _coerce_capability(value: Any) -> PermissionCapability:

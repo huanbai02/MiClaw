@@ -15,7 +15,7 @@ from .result import (
     tool_success,
 )
 from ..config import OFFICE_DIR
-from ..logger import log_permission_decision
+from ..logger import log_permission_confirmation, log_permission_decision
 from ..permissions import (
     PermissionCapability,
     PermissionDecision,
@@ -23,11 +23,15 @@ from ..permissions import (
     PermissionResult,
     RiskLevel,
     evaluate_permission,
+    get_permission_confirmation_handler,
+    resolve_permission,
 )
+from ..workspace import WorkspaceRoot, WorkspaceScope, get_active_project_root
 
 SYS_OS = platform.system()
 _permission_evaluator = evaluate_permission
 _permission_audit_logger = log_permission_decision
+_permission_confirmation_audit_logger = log_permission_confirmation
 SHELL_TIMEOUT_SECONDS = 10
 SHELL_OUTPUT_LIMIT = 4000
 
@@ -50,9 +54,14 @@ class ShellCommandClassification:
     blocked: bool = False
 
 
+def _get_active_workspace_root() -> WorkspaceRoot:
+    """优先返回显式 PROJECT root，否则返回默认 OFFICE root。"""
+    return get_active_project_root() or WorkspaceRoot(path=OFFICE_DIR, scope=WorkspaceScope.OFFICE)
+
+
 def _get_office_root() -> Path:
-    """返回 canonical 的 office workspace root。"""
-    return Path(OFFICE_DIR).resolve()
+    """返回 canonical office path，兼容现有内部调用与测试。"""
+    return _get_active_workspace_root().path
 
 
 def _reject_unsafe_path_input(user_path: str) -> None:
@@ -64,45 +73,58 @@ def _reject_unsafe_path_input(user_path: str) -> None:
         raise PermissionError("Absolute paths are not allowed")
 
 
-def _ensure_path_inside_base(path: Path, base: Path) -> None:
-    """如果 resolved path 不在 resolved base path 内，则抛出异常。"""
+def _ensure_path_inside_workspace(path: Path, workspace_root: WorkspaceRoot) -> None:
+    """如果 resolved path 不在 authorized workspace root 内，则抛出异常。"""
     try:
-        path.relative_to(base)
+        path.relative_to(workspace_root.path)
     except ValueError as exc:
-        raise PermissionError("Path is outside the office workspace") from exc
+        raise PermissionError(f"Path is outside the {workspace_root.scope.value} workspace") from exc
 
 
-def _resolve_candidate(user_path: str) -> tuple[Path, Path]:
+def _resolve_candidate(user_path: str, workspace_root: WorkspaceRoot) -> tuple[Path, Path]:
+    """相对指定 authorized root 解析 candidate 并校验 containment。"""
     _reject_unsafe_path_input(user_path)
-    base = _get_office_root()
+    base = workspace_root.path
     candidate = base / str(user_path or "")
     resolved = candidate.resolve(strict=False)
     try:
-        _ensure_path_inside_base(resolved, base)
+        _ensure_path_inside_workspace(resolved, workspace_root)
     except PermissionError as exc:
         if ".." in candidate.parts:
-            raise PermissionError("Path traversal outside office is not allowed") from exc
+            raise PermissionError(
+                f"Path traversal outside {workspace_root.scope.value} is not allowed"
+            ) from exc
         raise
     return resolved, base
 
 
-def _resolve_existing_office_path(user_path: str) -> Path:
-    """解析已存在的 office path，并确保 symlink 仍留在 office 内。"""
-    resolved, base = _resolve_candidate(user_path)
+def _resolve_existing_workspace_path(user_path: str, workspace_root: WorkspaceRoot) -> Path:
+    """解析 authorized root 内的 existing path，并阻止 symlink escape。"""
+    resolved, _ = _resolve_candidate(user_path, workspace_root)
     if not resolved.exists():
         return resolved
     resolved = resolved.resolve(strict=True)
-    _ensure_path_inside_base(resolved, base)
+    _ensure_path_inside_workspace(resolved, workspace_root)
     return resolved
 
 
-def _resolve_new_office_path(user_path: str) -> Path:
-    """解析写入目标，并安全校验 parent 与最终 target。"""
-    target, base = _resolve_candidate(user_path)
+def _resolve_existing_office_path(user_path: str) -> Path:
+    """解析已存在的 office path，兼容现有 tool 调用。"""
+    return _resolve_existing_workspace_path(user_path, _get_active_workspace_root())
+
+
+def _resolve_new_workspace_path(user_path: str, workspace_root: WorkspaceRoot) -> Path:
+    """解析 authorized root 内的新写入目标，并校验 parent 与最终 target。"""
+    target, _ = _resolve_candidate(user_path, workspace_root)
     parent = target.parent.resolve(strict=False)
-    _ensure_path_inside_base(parent, base)
-    _ensure_path_inside_base(target, base)
+    _ensure_path_inside_workspace(parent, workspace_root)
+    _ensure_path_inside_workspace(target, workspace_root)
     return target
+
+
+def _resolve_new_office_path(user_path: str) -> Path:
+    """解析 office write target，兼容现有 tool 调用。"""
+    return _resolve_new_workspace_path(user_path, _get_active_workspace_root())
 
 
 def _get_safe_path(relative_path: str) -> str:
@@ -110,23 +132,30 @@ def _get_safe_path(relative_path: str) -> str:
     return str(_resolve_new_office_path(relative_path))
 
 
-def _ensure_no_symlink_escape_in_office() -> None:
-    """防止 shell 命令通过逃逸 office 的 symlink 进行操作。"""
-    base = _get_office_root()
+def _ensure_no_symlink_escape(workspace_root: WorkspaceRoot) -> None:
+    """防止 shell 通过逃逸 authorized workspace root 的 symlink 操作外部路径。"""
+    base = workspace_root.path
     for entry in base.rglob("*"):
         if not entry.is_symlink():
             continue
         try:
             target = entry.resolve(strict=True)
         except OSError as exc:
-            raise PermissionError("Path is outside the office workspace") from exc
-        _ensure_path_inside_base(target, base)
+            raise PermissionError(
+                f"Path is outside the {workspace_root.scope.value} workspace"
+            ) from exc
+        _ensure_path_inside_workspace(target, workspace_root)
+
+
+def _relative_workspace_target(path: Path, workspace_root: WorkspaceRoot) -> str:
+    """生成用于 permission request 的安全 workspace-relative target。"""
+    relative_path = path.relative_to(workspace_root.path)
+    return "." if not relative_path.parts else relative_path.as_posix()
 
 
 def _relative_office_target(path: Path) -> str:
-    """生成用于 permission request 的安全 office 相对 target。"""
-    relative_path = path.relative_to(_get_office_root())
-    return "." if not relative_path.parts else relative_path.as_posix()
+    """生成 office-relative target，兼容现有 tool 调用。"""
+    return _relative_workspace_target(path, _get_active_workspace_root())
 
 
 def _format_result(result: ToolResult) -> str:
@@ -136,7 +165,12 @@ def _format_result(result: ToolResult) -> str:
 
 def _tool_metadata(tool_name: str, operation: str, target: str, **extra) -> dict:
     """生成 sandbox tool 的基础 metadata。"""
-    metadata = {"tool_name": tool_name, "operation": operation, "target": target}
+    metadata = {
+        "tool_name": tool_name,
+        "operation": operation,
+        "target": target,
+        "workspace_scope": _get_active_workspace_root().scope.value,
+    }
     metadata.update(extra)
     return metadata
 
@@ -214,20 +248,33 @@ def _evaluate_office_permission(request: PermissionRequest) -> PermissionResult:
 
 
 def _require_allowed_permission(request: PermissionRequest, metadata: dict) -> ToolResult | None:
-    """仅 ALLOW 可继续执行；DENY/ASK 都返回阻断 ToolResult。"""
-    result = _evaluate_office_permission(request)
-    metadata["permission_decision"] = result.decision.value
+    """评估并解析 permission；只有最终 ALLOW 可继续执行。"""
+    policy_result = _evaluate_office_permission(request)
+    metadata["permission_decision"] = policy_result.decision.value
     _permission_audit_logger(
         request,
-        result,
+        policy_result,
         tool_name=str(metadata.get("tool_name") or "unknown"),
         metadata=metadata,
     )
-    if result.decision is PermissionDecision.ALLOW:
+    confirmation_handler = get_permission_confirmation_handler()
+    final_result = resolve_permission(request, policy_result, confirmation_handler)
+    confirmation_source = final_result.metadata.get("confirmation_source")
+    if policy_result.decision is PermissionDecision.ASK and (
+        confirmation_handler is not None or confirmation_source == "session_grant"
+    ):
+        _permission_confirmation_audit_logger(
+            request,
+            policy_result,
+            final_result,
+            tool_name=str(metadata.get("tool_name") or "unknown"),
+            metadata=metadata,
+        )
+    if final_result.decision is PermissionDecision.ALLOW:
         return None
     return tool_permission_blocked(
-        _permission_block_message(result),
-        decision=result.decision.value,
+        _permission_block_message(final_result),
+        decision=final_result.decision.value,
         metadata=metadata,
     )
 
@@ -239,8 +286,9 @@ def list_office_files(sub_dir: str = "") -> str:
     如果 sub_dir 为空，则查看工位根目录。
     """
     try:
-        target_dir = _resolve_existing_office_path(sub_dir)
-        target = _relative_office_target(target_dir)
+        workspace_root = _get_active_workspace_root()
+        target_dir = _resolve_existing_workspace_path(sub_dir, workspace_root)
+        target = _relative_workspace_target(target_dir, workspace_root)
         metadata = _tool_metadata("list_office_files", "list", target)
         block_result = _require_allowed_permission(
             PermissionRequest(
@@ -248,7 +296,11 @@ def list_office_files(sub_dir: str = "") -> str:
                 operation="list",
                 target=target,
                 risk_level=RiskLevel.LOW,
-                reason="List files in office workspace",
+                reason=f"List files in {workspace_root.scope.value} workspace",
+                metadata={
+                    "tool_name": "list_office_files",
+                    "workspace_scope": workspace_root.scope.value,
+                },
             ),
             metadata,
         )
@@ -261,7 +313,8 @@ def list_office_files(sub_dir: str = "") -> str:
 
         items = os.listdir(target_dir)
         if not items:
-            message = f"[{sub_dir if sub_dir else 'office 根目录'}] 是空的。"
+            root_label = f"{workspace_root.scope.value} 根目录"
+            message = f"[{sub_dir if sub_dir else root_label}] 是空的。"
             return _format_result(tool_success(message, data={"items": []}, metadata=metadata))
 
         # 格式化输出，标注是文件还是文件夹
@@ -299,8 +352,9 @@ def read_office_file(filepath: str) -> str:
     filepath 参数应该是相对于 office 的路径，例如 "test.py" 或 "skills/my_skill.py"。
     """
     try:
-        target_path = _resolve_existing_office_path(filepath)
-        target = _relative_office_target(target_path)
+        workspace_root = _get_active_workspace_root()
+        target_path = _resolve_existing_workspace_path(filepath, workspace_root)
+        target = _relative_workspace_target(target_path, workspace_root)
         metadata = _tool_metadata("read_office_file", "read", target)
         block_result = _require_allowed_permission(
             PermissionRequest(
@@ -308,7 +362,11 @@ def read_office_file(filepath: str) -> str:
                 operation="read",
                 target=target,
                 risk_level=RiskLevel.LOW,
-                reason="Read file from office workspace",
+                reason=f"Read file from {workspace_root.scope.value} workspace",
+                metadata={
+                    "tool_name": "read_office_file",
+                    "workspace_scope": workspace_root.scope.value,
+                },
             ),
             metadata,
         )
@@ -370,8 +428,9 @@ def write_office_file(filepath: str, content: str, mode: str = "w") -> str:
     3. 禁止编写 与 跳出office工位 相关的任何语言脚本！
     """
     try:
-        target_path = _resolve_new_office_path(filepath)
-        target = _relative_office_target(target_path)
+        workspace_root = _get_active_workspace_root()
+        target_path = _resolve_new_workspace_path(filepath, workspace_root)
+        target = _relative_workspace_target(target_path, workspace_root)
         metadata = _tool_metadata("write_office_file", "write", target)
         block_result = _require_allowed_permission(
             PermissionRequest(
@@ -379,7 +438,11 @@ def write_office_file(filepath: str, content: str, mode: str = "w") -> str:
                 operation="write",
                 target=target,
                 risk_level=RiskLevel.LOW,
-                reason="Write file in office workspace",
+                reason=f"Write file in {workspace_root.scope.value} workspace",
+                metadata={
+                    "tool_name": "write_office_file",
+                    "workspace_scope": workspace_root.scope.value,
+                },
             ),
             metadata,
         )
@@ -440,15 +503,17 @@ def execute_office_shell(command: str) -> str:
     2. 这是一个非交互式终端！所有命令必须携带免确认参数（如 -y, --quiet）。
     3. 禁止使用 cd 命令跳出当前目录，你的活动范围仅限 office。
     4. [无状态警告] 每次执行都是独立的终端进程！需要进入子目录请使用“命令链”或相对路径。
-    5. 禁止一切形式跳出office工位!!! 例如运行跳出或查看office路径的任何脚本以及其他高危操作。
+    5. 禁止以任何形式跳出当前 active workspace root。
     """
-    metadata = _tool_metadata("execute_office_shell", "execute", "office")
+    workspace_root = _get_active_workspace_root()
+    workspace_scope = workspace_root.scope.value
+    metadata = _tool_metadata("execute_office_shell", "execute", workspace_scope)
     try:
         classification = classify_shell_command(command)
         metadata = _tool_metadata(
             "execute_office_shell",
             "execute",
-            "office",
+            workspace_scope,
             shell_risk_level=classification.risk_level.value,
             blocked_by_shell_safety=classification.blocked,
         )
@@ -472,27 +537,34 @@ def execute_office_shell(command: str) -> str:
         ]
         for pattern in dangerous_patterns:
             if re.search(pattern, command):
-                message = "❌ 权限拒绝：检测到危险的目录跳转指令。你被禁止离开 office 工位！"
+                message = (
+                    "❌ 权限拒绝：检测到危险的目录跳转指令。"
+                    f"你被禁止离开 {workspace_scope} workspace！"
+                )
                 return _format_result(tool_error("shell_error", message, content=message, metadata=metadata))
 
-        office_root = _get_office_root()
+        execution_root = workspace_root.path
         safe_shell_metadata = {
-            "cwd_scope": "office",
+            "cwd_scope": workspace_scope,
             "shell_command_present": bool(command),
             "command_length": len(command or ""),
             "shell_risk_level": classification.risk_level.value,
             "blocked_by_shell_safety": False,
         }
-        metadata = _tool_metadata("execute_office_shell", "execute", "office", **safe_shell_metadata)
-        _ensure_no_symlink_escape_in_office()
+        metadata = _tool_metadata("execute_office_shell", "execute", workspace_scope, **safe_shell_metadata)
+        _ensure_no_symlink_escape(workspace_root)
         block_result = _require_allowed_permission(
             PermissionRequest(
                 capability=PermissionCapability.SHELL_EXEC,
                 operation="execute",
-                target="office",
+                target=workspace_scope,
                 arguments=safe_shell_metadata,
                 risk_level=RiskLevel.MEDIUM,
-                reason="Execute shell command in office workspace",
+                reason=f"Execute shell command in {workspace_scope} workspace",
+                metadata={
+                    "tool_name": "execute_office_shell",
+                    "workspace_scope": workspace_scope,
+                },
             ),
             metadata,
         )
@@ -502,7 +574,7 @@ def execute_office_shell(command: str) -> str:
         result = subprocess.run(
             command,
             shell=True,
-            cwd=str(office_root),
+            cwd=str(execution_root),
             capture_output=True,
             encoding='utf-8',
             errors='replace',

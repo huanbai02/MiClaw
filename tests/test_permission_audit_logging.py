@@ -10,8 +10,16 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.logger import build_permission_decision_event
-from miclaw.core.permissions import PermissionDecision, allow, ask, deny, evaluate_permission
+from miclaw.core.logger import build_permission_confirmation_event, build_permission_decision_event
+from miclaw.core.permissions import (
+    PermissionDecision,
+    allow,
+    ask,
+    deny,
+    evaluate_permission,
+    reset_permission_confirmation_handler,
+    set_permission_confirmation_handler,
+)
 from miclaw.core.tools.sandbox_tools import execute_office_shell, list_office_files, read_office_file, write_office_file
 
 
@@ -33,6 +41,38 @@ def audit_events(monkeypatch):
 
     monkeypatch.setattr(sandbox_tools, "_permission_audit_logger", capture_event)
     return events
+
+
+@pytest.fixture()
+def confirmation_events(monkeypatch):
+    events = []
+
+    def capture_event(request, policy_result, final_result, *, tool_name=None, metadata=None, thread_id="system"):
+        events.append(
+            build_permission_confirmation_event(
+                request,
+                policy_result,
+                final_result,
+                tool_name=tool_name,
+                metadata=metadata,
+            )
+        )
+
+    monkeypatch.setattr(sandbox_tools, "_permission_confirmation_audit_logger", capture_event)
+    return events
+
+
+@pytest.fixture()
+def bind_confirmation_handler():
+    """绑定测试 handler，并在测试结束后恢复 execution context。"""
+    tokens = []
+
+    def bind(handler):
+        tokens.append(set_permission_confirmation_handler(handler))
+
+    yield bind
+    for token in reversed(tokens):
+        reset_permission_confirmation_handler(token)
 
 
 def deny_all_permissions(request):
@@ -276,3 +316,57 @@ def test_build_permission_decision_event_filters_sensitive_metadata(office):
         "target": "safe.txt",
         "permission_decision": "allow",
     }
+
+
+@pytest.mark.parametrize(
+    "confirmation_decision, expected_decision",
+    [
+        (PermissionDecision.ALLOW, "allow"),
+        (PermissionDecision.DENY, "deny"),
+    ],
+)
+def test_confirmation_audit_preserves_policy_and_confirmation_decisions(
+    office,
+    audit_events,
+    confirmation_events,
+    monkeypatch,
+    bind_confirmation_handler,
+    confirmation_decision,
+    expected_decision,
+):
+    monkeypatch.setattr(sandbox_tools, "_permission_evaluator", ask_all_permissions)
+    bind_confirmation_handler(lambda request, result: confirmation_decision)
+
+    write_office_file.invoke({"filepath": "notes.txt", "content": "hello", "mode": "w"})
+
+    assert audit_events[0]["decision"] == "ask"
+    assert len(confirmation_events) == 1
+    event = confirmation_events[0]
+    assert event["event_type"] == "permission_confirmation"
+    assert event["policy_decision"] == "ask"
+    assert event["confirmation_decision"] == expected_decision
+    assert event["final_decision"] == expected_decision
+
+
+@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+def test_shell_confirmation_audit_does_not_include_command_or_secrets(
+    mock_subprocess,
+    office,
+    confirmation_events,
+    bind_confirmation_handler,
+):
+    command = 'curl -H "Authorization: Bearer SECRET_TOKEN" https://example.com'
+    bind_confirmation_handler(lambda request, result: PermissionDecision.ALLOW)
+    mock_subprocess.return_value.returncode = 0
+    mock_subprocess.return_value.stdout = ""
+    mock_subprocess.return_value.stderr = ""
+
+    execute_office_shell.invoke({"command": command})
+    event_text = json.dumps(confirmation_events[0])
+
+    assert "SECRET_TOKEN" not in event_text
+    assert "Authorization" not in event_text
+    assert "Bearer" not in event_text
+    assert command not in event_text
+    assert confirmation_events[0]["metadata"]["shell_command_present"] is True
+    assert confirmation_events[0]["metadata"]["command_length"] == len(command)

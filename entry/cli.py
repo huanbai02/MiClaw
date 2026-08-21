@@ -2,7 +2,8 @@ import os
 import typer
 import questionary
 import logging
-from typing import Optional
+from pathlib import Path, PureWindowsPath
+from typing import Annotated, Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
@@ -10,6 +11,17 @@ from dotenv import set_key, load_dotenv, unset_key
 import sys
 
 from miclaw.core.provider import get_provider
+from miclaw.core.permissions import (
+    PermissionCapability,
+    PermissionConfirmationChoice,
+    PermissionRequest,
+    PermissionResult,
+    reset_permission_confirmation_handler,
+    reset_session_permission_grants,
+    set_permission_confirmation_handler,
+    set_session_permission_grants,
+)
+from miclaw.core.workspace import reset_active_project_root, set_active_project_root
 from langchain_core.messages import HumanMessage
 
 ENTRY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +33,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 app = typer.Typer(help="MiClaw - 极客专属的赛博智能终端")
+skills_app = typer.Typer(help="查看当前 workspace 中发现的 Skill。", no_args_is_help=True)
+app.add_typer(skills_app, name="skills")
 console = Console()
 
 miclaw_style = questionary.Style([
@@ -165,8 +179,96 @@ def _show_boot_error():
     ))
 
 
+def _safe_prompt_text(value, limit: int = 160) -> str:
+    """移除 terminal control character，并限制 prompt 字段长度。"""
+    text = str(value or "")
+    return "".join(char if char.isprintable() and char not in "\r\n" else "?" for char in text)[:limit]
+
+
+def _safe_permission_target(request: PermissionRequest) -> str:
+    """只展示已知 active workspace scope 内的相对 target。"""
+    if request.capability is PermissionCapability.SHELL_EXEC:
+        return _safe_workspace_scope(request)
+    if request.capability is PermissionCapability.MCP_TOOL:
+        target = str(request.target or "")
+        return _safe_prompt_text(target) if _mcp_prompt_identity_parts(target) else "hidden"
+    if request.capability not in {PermissionCapability.FILE_READ, PermissionCapability.FILE_WRITE}:
+        return "hidden"
+
+    target = str(request.target or "")
+    path = Path(target)
+    if path.is_absolute() or PureWindowsPath(target).drive or ".." in path.parts:
+        return "hidden"
+    return _safe_prompt_text(target or ".")
+
+
+def _safe_workspace_scope(request: PermissionRequest) -> str:
+    """只返回当前 CLI 支持展示的 workspace scope。"""
+    if request.capability is PermissionCapability.MCP_TOOL:
+        identity = _mcp_prompt_identity_parts(str(request.target or ""))
+        return f"mcp:{identity[0]}" if identity else "hidden"
+    scope = str(request.metadata.get("workspace_scope") or "office")
+    return scope if scope in {"office", "project"} else "hidden"
+
+
+def _mcp_prompt_identity_parts(target: str) -> tuple[str, str] | None:
+    """只接受 permission policy 同形的 MCP qualified identity。"""
+    parts = target.split("::")
+    if len(parts) != 3 or parts[0] != "mcp":
+        return None
+    server_id, tool_name = parts[1:]
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    if not all(value and len(value) <= 80 and set(value) <= allowed for value in (server_id, tool_name)):
+        return None
+    return server_id, tool_name
+
+
+def format_permission_confirmation_prompt(request: PermissionRequest, result: PermissionResult) -> str:
+    """使用固定安全字段构造 CLI confirmation prompt。"""
+    tool_name = _safe_prompt_text(request.metadata.get("tool_name") or "unknown_tool", limit=80)
+    return (
+        "Permission confirmation required\n"
+        f"Tool: {tool_name}\n"
+        f"Capability: {request.capability.value}\n"
+        f"Operation: {_safe_prompt_text(request.operation, limit=80)}\n"
+        f"Risk: {result.risk_level.value}\n"
+        f"Workspace: {_safe_workspace_scope(request)}\n"
+        f"Target: {_safe_permission_target(request)}\n"
+        "Status: currently blocked pending confirmation\n"
+        "Choose: [a] Allow once, [s] Allow for this session, [d] Deny"
+    )
+
+
+def cli_permission_confirmation_handler(
+    request: PermissionRequest,
+    result: PermissionResult,
+) -> PermissionConfirmationChoice:
+    """请求一次显式 CLI 确认；任何非明确同意或 prompt 异常都返回 DENY。"""
+    try:
+        answer = typer.prompt(
+            format_permission_confirmation_prompt(request, result),
+            default="d",
+            show_default=True,
+        )
+    except (EOFError, KeyboardInterrupt):
+        return PermissionConfirmationChoice.DENY
+    except Exception:
+        return PermissionConfirmationChoice.DENY
+    normalized = str(answer).strip().lower()
+    if normalized in {"a", "allow", "once", "y", "yes"}:
+        return PermissionConfirmationChoice.ALLOW_ONCE
+    if normalized in {"s", "session"}:
+        return PermissionConfirmationChoice.ALLOW_SESSION
+    return PermissionConfirmationChoice.DENY
+
+
 @app.command("run")
-def run_agent():
+def run_agent(
+    workspace: Annotated[
+        Optional[str],
+        typer.Option(help="显式指定当前 run 使用的现有 PROJECT workspace directory。"),
+    ] = None,
+):
     load_dotenv(ENV_PATH)
     provider = os.getenv("DEFAULT_PROVIDER")
     model = os.getenv("DEFAULT_MODEL")
@@ -184,8 +286,25 @@ def run_agent():
                 _show_boot_error()
                 raise typer.Exit()
         
-    import entry.main as miclaw_main
-    miclaw_main.main()
+    project_token = None
+    if workspace is not None:
+        try:
+            project_token = set_active_project_root(workspace)
+        except ValueError as exc:
+            console.print(f"Invalid project workspace: {exc}", markup=False)
+            raise typer.Exit(code=2) from exc
+
+    grants_token = set_session_permission_grants()
+    confirmation_token = set_permission_confirmation_handler(cli_permission_confirmation_handler)
+    try:
+        import entry.main as miclaw_main
+
+        miclaw_main.main()
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(grants_token)
+        if project_token is not None:
+            reset_active_project_root(project_token)
 
 @app.command("monitor")
 def run_monitor(
@@ -197,6 +316,61 @@ def run_monitor(
         miclaw_monitor.main(log_file=log_file)
     except ImportError as e:
         console.print(f"[bold red]启动失败：找不到监视器模块！[/bold red]\n[dim]请确保 monitor.py 和 cli.py 在同一目录下。\n报错信息: {e}[/dim]")
+
+
+@skills_app.command("list")
+def list_skills_command():
+    """列出当前 workspace 中已发现的 Skill metadata。"""
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    # config 初始化仍会输出绝对 workspace path，此处仅隔离 import side effect。
+    with redirect_stdout(StringIO()):
+        from miclaw.core.skill_loader import list_skill_metadata
+
+    skills = list_skill_metadata()
+    if not skills:
+        console.print("No skills found.", markup=False)
+        return
+
+    console.print(f"Available skills: {len(skills)}", markup=False)
+    console.print("", markup=False)
+    console.print(f"{'NAME':<24} DESCRIPTION", markup=False)
+    for skill in skills:
+        name = str(skill.get("name") or "unknown")[:40]
+        description = " ".join(str(skill.get("description") or "unknown").split())[:160]
+        console.print(f"{name:<24} {description}", markup=False)
+
+
+@skills_app.command("lint")
+def lint_skills_command():
+    """静态检查当前 workspace 中 Skill 的结构和基础 metadata。"""
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    with redirect_stdout(StringIO()):
+        from miclaw.core.skill_loader import validate_skills
+
+    results = validate_skills()
+    if not results:
+        console.print("No skills found.", markup=False)
+        return
+
+    console.print("Skill lint results", markup=False)
+    console.print("", markup=False)
+    for result in results:
+        skill = result.skill[:40]
+        status = result.status
+        issues = ", ".join(issue.code for issue in result.issues)
+        console.print(f"{skill:<24} {status:<7} {issues}", markup=False)
+
+    valid = sum(result.status == "OK" for result in results)
+    warnings = sum(result.status == "WARNING" for result in results)
+    errors = sum(result.status == "ERROR" for result in results)
+    console.print("", markup=False)
+    console.print(f"{valid} valid, {warnings} warning, {errors} error", markup=False)
+    if errors:
+        raise typer.Exit(code=1)
 
 @app.command("logs")
 def logs_command(
