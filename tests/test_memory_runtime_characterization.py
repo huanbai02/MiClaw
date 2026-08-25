@@ -153,20 +153,24 @@ def test_agent_reads_successfully_replaced_profile_on_next_invocation(tmp_path, 
     assert "ATOMIC_PROFILE_VERSION_A" not in second_prompt
 
 
-def test_project_workspace_does_not_switch_explicit_memory_root(tmp_path, monkeypatch):
-    """PROJECT root 只影响 workspace tools，不改变 agent 使用的 Memory directory。"""
+def test_project_workspace_uses_scoped_profile_with_global_fallback(tmp_path, monkeypatch):
+    """PROJECT Agent 先读 GLOBAL fallback，写入 scoped profile 后改为读取该 profile。"""
     global_memory = tmp_path / "workspace" / "memory"
     global_memory.mkdir(parents=True)
     (global_memory / "user_profile.md").write_text("GLOBAL_PROFILE_MARKER", encoding="utf-8")
     project_root = tmp_path / "project"
-    (project_root / "memory").mkdir(parents=True)
-    (project_root / "memory" / "user_profile.md").write_text("PROJECT_PROFILE_MARKER", encoding="utf-8")
+    project_root.mkdir()
 
     token = set_active_project_root(project_root)
     try:
-        prompt = _capture_system_prompt(monkeypatch, global_memory)
+        fallback_prompt = _capture_system_prompt(monkeypatch, global_memory)
+        get_user_profile_store(global_memory).write_profile("PROJECT_PROFILE_MARKER")
+        project_prompt = _capture_system_prompt(monkeypatch, global_memory)
     finally:
         reset_active_project_root(token)
 
-    assert "GLOBAL_PROFILE_MARKER" in prompt
-    assert "PROJECT_PROFILE_MARKER" not in prompt
+    assert "GLOBAL_PROFILE_MARKER" in fallback_prompt
+    assert "PROJECT_PROFILE_MARKER" not in fallback_prompt
+    assert "PROJECT_PROFILE_MARKER" in project_prompt
+    assert "GLOBAL_PROFILE_MARKER" not in project_prompt
+    assert (global_memory / "user_profile.md").read_text(encoding="utf-8") == "GLOBAL_PROFILE_MARKER"

@@ -35,11 +35,12 @@ def get_system_model_info() -> str:
 @miclaw_tool
 def save_user_profile(new_content: str) -> str:
     """
-    更新用户的全局显性记忆档案。
+    保存或更新当前工作区对应的用户长期画像。
+    默认 OFFICE 工作区写入全局画像；PROJECT 工作区写入当前项目范围的画像。
+    画像范围由运行时当前工作区决定，不能通过参数自行选择。
     当你发现用户的偏好发生改变，或者有新的重要事实需要记录时：
-    1.请先调用 read_user_profile 获取当前的完整档案。
-    2.在你的上下文中，将新信息融入档案，并删去冲突或过时的旧信息。
-    3.将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
+    1.在你的上下文中，将新信息融入当前完整档案，并删去冲突或过时的旧信息。
+    2.将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
     注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
     """
     get_user_profile_store(MEMORY_DIR).write_profile(new_content)

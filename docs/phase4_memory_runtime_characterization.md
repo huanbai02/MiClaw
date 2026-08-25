@@ -1,6 +1,6 @@
 # MiClaw Phase 4：Memory Runtime Characterization
 
-本文记录 PR 32 建立、由 PR 33/34 保持的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 仅为读取结果补充最小的结构化语义模型，不定义新的通用 `MemoryStore`、retrieval、project isolation 或 context API。
+本文记录 PR 32 建立、由 PR 33–36 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing。本文仍不定义通用 `MemoryStore`、retrieval 或 context API。
 
 ## 1. 当前 Memory 概览
 
@@ -20,14 +20,15 @@
 ```text
 WORKSPACE_DIR = $MICLAW_WORKSPACE 或 <project>/workspace
 MEMORY_DIR    = <WORKSPACE_DIR>/memory
-UserProfileStore.profile_path = <MEMORY_DIR>/user_profile.md
+GLOBAL profile = <MEMORY_DIR>/user_profile.md
+PROJECT profile = <MEMORY_DIR>/projects/<opaque-project-id>/user_profile.md
 ```
 
-Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`、`memory/`、`office/`、`office/skills/` 等目录；它不会创建 `user_profile.md`。当前没有 daily memory、agent-specific memory、task memory、per-project profile 文件或 metadata index。
+Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`、`memory/`、`office/`、`office/skills/` 等目录；它不会创建 profile 文件或 `projects/` 子目录。当前没有 daily memory、agent-specific memory、task memory 或 metadata index。
 
 ### 格式与范围
 
-`user_profile.md` 是任意 UTF-8 Markdown 文本，没有 front matter、record schema、version、分段约定或文件大小限制。Agent 只读取这个固定文件；同一 `memory/` 目录中的其他 `.md` 文件不会自动进入 prompt。
+每个 `user_profile.md` 都是任意 UTF-8 Markdown 文本，没有 front matter、record schema、version、分段约定或文件大小限制。Agent 每次只选择一个 effective profile：OFFICE 为 GLOBAL；PROJECT 为非空 PROJECT profile，缺失时只读回退 GLOBAL。其他 `.md` 文件不会自动进入 prompt。
 
 正常运行中 workspace 由环境变量在 import 前决定；当前没有 runtime workspace switching API。`agent.py` 与 `builtins.py` 仍在 import 时取得 `MEMORY_DIR`，因此若进程内显式 reload `miclaw.core.config`，这些已导入模块不会自动切换到新的 Memory root。这是当前 module-level config binding 的限制；`UserProfileStore` 本身不缓存内容。
 
@@ -36,8 +37,8 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.create_agent_app()` 内部的 `agent_node`，它通过 `UserProfileStore` 读取：
 
 ```text
-<WORKSPACE_DIR>/memory/user_profile.md
-    ↓ UserProfileStore.read_profile()
+effective GLOBAL/PROJECT user_profile.md
+    ↓ UserProfileStore.read_record()
     ↓ Path.exists + read_text(encoding="utf-8", errors="ignore").strip()
     ↓ profile_content（空/缺失时为“暂无记录”）
     ↓ system prompt 的“用户长期画像（静态偏好）”段
@@ -112,9 +113,15 @@ Profile 有明确文本 delimiter，但没有独立 provenance model、trust lev
 
 ### PROJECT workspace
 
-`miclaw run --workspace <path>` 只通过 ContextVar 激活 PROJECT root，供 file/shell sandbox Tool 解析 active root。它不会改变 `config.MEMORY_DIR`，也不会改变 `agent.py` / `builtins.py` 传给 `UserProfileStore` 的 `MEMORY_DIR`。
+`miclaw run --workspace <path>` 通过 ContextVar 激活已 canonicalized 的 PROJECT root，供 file/shell sandbox Tool 与 `UserProfileStore` factory 共同使用。它不改变 `config.MEMORY_DIR`，但会让 profile Store 选择其中的 PROJECT namespace：
 
-因此，Project A 与 Project B 的 Agent run 在相同 `MICLAW_WORKSPACE` 下共享同一个 `workspace/memory/user_profile.md` namespace。这是当前已知 isolation limitation；显式 PROJECT authorization 不会自动建立 project-scoped Memory。
+```text
+<MEMORY_DIR>/projects/<sha256(canonical-project-path)[:24]>/user_profile.md
+```
+
+PROJECT profile 存在且非空时优先读取；缺失、空或 `errors="ignore"` 后为空时只读回退 GLOBAL `<MEMORY_DIR>/user_profile.md`，不会 copy、merge 或创建 project profile。PROJECT 写入只覆盖该 PROJECT 文件，永不覆盖 GLOBAL profile；Project A/B 的 derived ID 不同，因此 namespace 隔离。
+
+相同 canonical path 在进程重启后会得到相同 ID；项目移动到不同绝对路径则得到新 namespace。当前没有 project manifest identity、迁移或 registry。EXTERNAL/未知 workspace scope 不能静默回退 GLOBAL，而是以 `unsupported_memory_scope` fail closed。
 
 ### Shell 与 generic Tool 的关系
 
@@ -153,7 +160,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - 缺失 profile 回退为 `暂无记录`，其他 `memory/` sibling file 不会自动读取。
 - profile 全量进入 system prompt，`AgentState.summary` 也进入同一 system prompt。
 - 同一个 Agent app 的每次 node 从 filesystem 重读 profile，文件更新可见；invalid UTF-8 byte 被忽略。
-- 激活 PROJECT root 不会切换显式 Memory root。
+- PROJECT profile 优先于 GLOBAL fallback；PROJECT write 不会修改 GLOBAL profile。
 
 既有 `tests/test_builtins.py` 覆盖 profile save 的基础成功路径；`tests/test_sandbox_tools.py` 覆盖 generic office file Tool 对 `../memory/user_profile.md` 的 containment rejection；`tests/test_agent.py` 与 context tests 覆盖 Agent graph/state 的基础行为。
 
@@ -161,8 +168,8 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 
 ### Current behavior
 
-- 单一、全局的 `user_profile.md`，没有 user/project/task namespace。
-- PROJECT workspace 不隔离 profile；同一 `MICLAW_WORKSPACE` 下的 Project runs 共享它。
+- 仅有 GLOBAL profile 和一个按 canonical project path digest 路由的 PROJECT profile；没有 user/task namespace 或多 record retrieval。
+- 项目移动会改变 PROJECT namespace；当前没有 manifest identity、迁移或 registry。
 - 只读取一个固定文件，没有 multi-file discovery、排序、retrieval 或 relevance selection。
 - profile 全量 direct concatenation 进 SystemMessage，没有 hard budget、provenance 或 instruction/data boundary。
 - 缺少正式 profile read Tool；现有 write Tool docstring 引用了不存在的 `read_user_profile`。
@@ -199,6 +206,6 @@ content   = 原 Markdown 全文
 
 `source` 仅表示 record 来自 `UserProfileStore` 这一来源通道，不证明内容由用户本人创作。`GLOBAL` 是当前 profile 的逻辑 scope：它不表示不受限权限，也不改变 OFFICE/PROJECT filesystem authorization。模型也不会看到上述 id、scope 或 source；Agent 仅继续使用 `record.content` 组装原有 prompt。
 
-模型词表也可表达带非空 opaque `scope_id` 的 `PROJECT` scope，但 PR 34 没有创建 project storage、没有从路径生成 id、也没有在 PROJECT run 中启用该 route。`read_profile()` 仍保留，并委托 `read_record()` 以保持原字符串 API。
+`read_profile()` 仍保留，并委托 `read_record()` 以保持原字符串 API。PR 36 使用已授权 canonical PROJECT root 的 SHA-256 digest（前 24 个 hex 字符）作为 opaque `scope_id`，并将 PROJECT profile 放在 `<MEMORY_DIR>/projects/<scope_id>/user_profile.md`；它不把原路径放入 prompt、record、filename 或 diagnostics。
 
-PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boundary；PR 34 只将内部读取表示由 `str` 提升为 `MemoryRecord`；PR 35 将写入替换为 atomic replace，并保持其余 observable behavior 不变。
+PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boundary；PR 34 将内部读取表示由 `str` 提升为 `MemoryRecord`；PR 35 将写入替换为 atomic replace；PR 36 有意识地改变 profile persistence routing：OFFICE 保持 GLOBAL，PROJECT 使用 scoped profile 并在缺失时回退 GLOBAL。
