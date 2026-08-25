@@ -1,6 +1,6 @@
 # MiClaw Phase 4：Memory Runtime Characterization
 
-本文记录 PR 32 时当前代码库中与 Memory 相关的实际 runtime 行为。它是后续重构的基线，不定义新的 `MemoryStore`、retrieval、project isolation 或 context API。
+本文记录 PR 32 建立、并由 PR 33 保持的 Memory runtime 行为。PR 33 仅将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；不定义新的通用 `MemoryStore`、retrieval、project isolation 或 context API。
 
 ## 1. 当前 Memory 概览
 
@@ -20,7 +20,7 @@
 ```text
 WORKSPACE_DIR = $MICLAW_WORKSPACE 或 <project>/workspace
 MEMORY_DIR    = <WORKSPACE_DIR>/memory
-PROFILE_PATH  = <MEMORY_DIR>/user_profile.md
+UserProfileStore.profile_path = <MEMORY_DIR>/user_profile.md
 ```
 
 Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`、`memory/`、`office/`、`office/skills/` 等目录；它不会创建 `user_profile.md`。当前没有 daily memory、agent-specific memory、task memory、per-project profile 文件或 metadata index。
@@ -29,16 +29,16 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 
 `user_profile.md` 是任意 UTF-8 Markdown 文本，没有 front matter、record schema、version、分段约定或文件大小限制。Agent 只读取这个固定文件；同一 `memory/` 目录中的其他 `.md` 文件不会自动进入 prompt。
 
-`PROFILE_PATH` 在 `miclaw.core.tools.builtins` import 时由当时的 `MEMORY_DIR` 计算。正常运行中 workspace 由环境变量在 import 前决定；当前没有 runtime workspace switching API 来重新绑定这个常量。若进程内显式 reload `miclaw.core.config`，已导入 `builtins.PROFILE_PATH` 不会自动跟随新的 `MEMORY_DIR`，这是当前 module-level import binding 的限制。
+正常运行中 workspace 由环境变量在 import 前决定；当前没有 runtime workspace switching API。`agent.py` 与 `builtins.py` 仍在 import 时取得 `MEMORY_DIR`，因此若进程内显式 reload `miclaw.core.config`，这些已导入模块不会自动切换到新的 Memory root。这是当前 module-level config binding 的限制；`UserProfileStore` 本身不缓存内容。
 
 ## 3. Read Path
 
-显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.create_agent_app()` 内部的 `agent_node`：
+显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.create_agent_app()` 内部的 `agent_node`，它通过 `UserProfileStore` 读取：
 
 ```text
 <WORKSPACE_DIR>/memory/user_profile.md
-    ↓ os.path.exists
-    ↓ open(..., encoding="utf-8", errors="ignore").read().strip()
+    ↓ UserProfileStore.read_profile()
+    ↓ Path.exists + read_text(encoding="utf-8", errors="ignore").strip()
     ↓ profile_content（空/缺失时为“暂无记录”）
     ↓ system prompt 的“用户长期画像（静态偏好）”段
     ↓ model invocation
@@ -62,9 +62,9 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 
 ```text
 save_user_profile(new_content)
-    ↓ os.makedirs(MEMORY_DIR, exist_ok=True)
-    ↓ open(PROFILE_PATH, "w", encoding="utf-8")
-    ↓ f.write(new_content)
+    ↓ UserProfileStore.write_profile(new_content)
+    ↓ parent.mkdir(parents=True, exist_ok=True)
+    ↓ write_text(..., encoding="utf-8")
     ↓ <WORKSPACE_DIR>/memory/user_profile.md
 ```
 
@@ -111,7 +111,7 @@ Profile 有明确文本 delimiter，但没有独立 provenance model、trust lev
 
 ### PROJECT workspace
 
-`miclaw run --workspace <path>` 只通过 ContextVar 激活 PROJECT root，供 file/shell sandbox Tool 解析 active root。它不会改变 `config.MEMORY_DIR`、`builtins.PROFILE_PATH` 或 `agent.MEMORY_DIR`。
+`miclaw run --workspace <path>` 只通过 ContextVar 激活 PROJECT root，供 file/shell sandbox Tool 解析 active root。它不会改变 `config.MEMORY_DIR`，也不会改变 `agent.py` / `builtins.py` 传给 `UserProfileStore` 的 `MEMORY_DIR`。
 
 因此，Project A 与 Project B 的 Agent run 在相同 `MICLAW_WORKSPACE` 下共享同一个 `workspace/memory/user_profile.md` namespace。这是当前已知 isolation limitation；显式 PROJECT authorization 不会自动建立 project-scoped Memory。
 
@@ -119,7 +119,7 @@ Profile 有明确文本 delimiter，但没有独立 provenance model、trust lev
 
 文件 Tool 的 relative-path containment 阻止其读取 `memory/`。Shell Tool 的 `cwd` 是 active OFFICE/PROJECT root，并另外用危险 pattern 拦截 `..`、absolute path、home path 和 Windows drive path，因此当前 shell input 不能以 `../memory/...` 方式访问 profile。
 
-这不改变 `save_user_profile` 的性质：它是直接使用配置路径的内置 Tool，不通过 generic file Tool 的 containment，也不通过当前 permission pipeline。
+这不改变 `save_user_profile` 的性质：它通过固定配置路径构造的 `UserProfileStore` 写入，不通过 generic file Tool 的 containment，也不通过当前 permission pipeline。
 
 ## 8. Scheduler、Skill 与 Tool 关系
 
@@ -147,11 +147,11 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 
 `tests/test_memory_runtime_characterization.py` 锁定以下现状：
 
-- `MEMORY_DIR` 与 `PROFILE_PATH` 的 workspace-relative 配置关系。
+- `MEMORY_DIR` 与 `UserProfileStore.profile_path` 的 workspace-relative 配置关系。
 - `save_user_profile` 创建 UTF-8 profile，并以 complete overwrite 更新它。
 - 缺失 profile 回退为 `暂无记录`，其他 `memory/` sibling file 不会自动读取。
 - profile 全量进入 system prompt，`AgentState.summary` 也进入同一 system prompt。
-- Agent 每次 node 从 filesystem 重读 profile，文件更新可见；invalid UTF-8 byte 被忽略。
+- 同一个 Agent app 的每次 node 从 filesystem 重读 profile，文件更新可见；invalid UTF-8 byte 被忽略。
 - 激活 PROJECT root 不会切换显式 Memory root。
 
 既有 `tests/test_builtins.py` 覆盖 profile save 的基础成功路径；`tests/test_sandbox_tools.py` 覆盖 generic office file Tool 对 `../memory/user_profile.md` 的 containment rejection；`tests/test_agent.py` 与 context tests 覆盖 Agent graph/state 的基础行为。
@@ -184,4 +184,4 @@ PR 33+ 在重构时至少需要显式处理：
 4. 为 retrieval/context injection 定义可验证的 size/token budget 和 provenance。
 5. 为 Memory write 定义 permission、failure、concurrency 与 history 语义，而不是隐式继承当前直接覆写行为。
 
-PR 32 只记录以上基线，没有修改 runtime behavior。
+PR 32 建立了以上基线；PR 33 仅抽取 `UserProfileStore` filesystem boundary，并保持这些 observable behavior 不变。

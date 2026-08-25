@@ -11,10 +11,10 @@ from .sandbox_tools import (
     write_office_file,
     execute_office_shell
 )
+from ..user_profile import get_user_profile_store
 
 
 tasks_lock = threading.Lock()
-PROFILE_PATH = os.path.join(MEMORY_DIR, "user_profile.md")
 
 
 @miclaw_tool
@@ -42,9 +42,7 @@ def save_user_profile(new_content: str) -> str:
     3.将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
     注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
     """
-    os.makedirs(MEMORY_DIR, exist_ok=True)
-    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
-        f.write(new_content)
+    get_user_profile_store(MEMORY_DIR).write_profile(new_content)
 
     return "记忆档案已成功覆写更新。新的人设画像已生效。"
 

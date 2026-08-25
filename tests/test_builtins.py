@@ -62,8 +62,7 @@ class TestBuiltInTools(unittest.TestCase):
                 self.assertIn("计算出错", result)
 
     @patch('miclaw.core.tools.builtins.MEMORY_DIR', new_callable=lambda: tempfile.mkdtemp())
-    @patch('miclaw.core.tools.builtins.PROFILE_PATH', new_callable=lambda: tempfile.mktemp())
-    def test_save_user_profile(self, mock_profile_path, mock_memory_dir):
+    def test_save_user_profile(self, mock_memory_dir):
         """测试保存用户档案功能"""
         from miclaw.core.tools.builtins import save_user_profile
 
@@ -75,9 +74,10 @@ class TestBuiltInTools(unittest.TestCase):
         result = save_user_profile.invoke({"new_content": test_content})
         self.assertEqual(result, "记忆档案已成功覆写更新。新的人设画像已生效。")
 
+        profile_path = os.path.join(mock_memory_dir, "user_profile.md")
         # 验证文件已创建并包含正确内容
-        self.assertTrue(os.path.exists(mock_profile_path))
-        with open(mock_profile_path, 'r', encoding='utf-8') as f:
+        self.assertTrue(os.path.exists(profile_path))
+        with open(profile_path, 'r', encoding='utf-8') as f:
             saved_content = f.read()
         self.assertEqual(saved_content, test_content)
 

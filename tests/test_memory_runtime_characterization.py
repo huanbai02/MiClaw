@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from miclaw.core import agent
 from miclaw.core import config
 from miclaw.core.tools import builtins
+from miclaw.core.user_profile import get_user_profile_store
 from miclaw.core.workspace import reset_active_project_root, set_active_project_root
 
 
@@ -72,7 +73,7 @@ def _capture_system_prompt(monkeypatch, memory_dir: Path, *, summary: str = "") 
 def test_memory_root_and_profile_filename_are_workspace_scoped_configuration():
     """当前显式 Memory root 固定为 MICLAW_WORKSPACE 下的 memory/。"""
     assert Path(config.MEMORY_DIR) == Path(config.WORKSPACE_DIR) / "memory"
-    assert Path(builtins.PROFILE_PATH).name == "user_profile.md"
+    assert get_user_profile_store(config.MEMORY_DIR).profile_path == Path(config.MEMORY_DIR) / "user_profile.md"
 
 
 def test_save_user_profile_creates_utf8_profile_and_overwrites_previous_content(tmp_path, monkeypatch):
@@ -80,7 +81,6 @@ def test_save_user_profile_creates_utf8_profile_and_overwrites_previous_content(
     memory_dir = tmp_path / "memory"
     profile_path = memory_dir / "user_profile.md"
     monkeypatch.setattr(builtins, "MEMORY_DIR", str(memory_dir))
-    monkeypatch.setattr(builtins, "PROFILE_PATH", str(profile_path))
 
     assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第一版\n"})
     assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第二版：偏好"})
