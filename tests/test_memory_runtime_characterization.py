@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from miclaw.core import agent
 from miclaw.core import config
 from miclaw.core.tools import builtins
-from miclaw.core.user_profile import get_user_profile_store
+from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
 from miclaw.core.workspace import reset_active_project_root, set_active_project_root
 
 
@@ -134,6 +134,23 @@ def test_agent_reads_profile_from_filesystem_each_invocation_and_ignores_invalid
     assert "PROFILE_VERSION_B" not in first_prompt
     assert "PROFILE_VERSION_B" in second_prompt
     assert "PROFILE_VERSION_A" not in second_prompt
+
+
+def test_agent_reads_successfully_replaced_profile_on_next_invocation(tmp_path, monkeypatch):
+    """同一 app 在 Store 原子替换后仍从 filesystem 读取新内容。"""
+    memory_dir = tmp_path / "memory"
+    store = UserProfileStore(memory_dir / "user_profile.md")
+    app, model = _build_capture_app(monkeypatch, memory_dir)
+
+    store.write_profile("ATOMIC_PROFILE_VERSION_A")
+    first_prompt = _invoke_and_capture_system_prompt(app, model)
+    store.write_profile("ATOMIC_PROFILE_VERSION_B")
+    second_prompt = _invoke_and_capture_system_prompt(app, model)
+
+    assert "ATOMIC_PROFILE_VERSION_A" in first_prompt
+    assert "ATOMIC_PROFILE_VERSION_B" not in first_prompt
+    assert "ATOMIC_PROFILE_VERSION_B" in second_prompt
+    assert "ATOMIC_PROFILE_VERSION_A" not in second_prompt
 
 
 def test_project_workspace_does_not_switch_explicit_memory_root(tmp_path, monkeypatch):

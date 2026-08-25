@@ -2,9 +2,16 @@
 
 from pathlib import Path
 
+import pytest
+
+from miclaw.core import user_profile
 from miclaw.core.tools import builtins
 from miclaw.core.memory import MemoryKind, MemoryScopeKind, MemorySource
-from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
+from miclaw.core.user_profile import (
+    UserProfilePersistenceError,
+    UserProfileStore,
+    get_user_profile_store,
+)
 from miclaw.core.workspace import reset_active_project_root, set_active_project_root
 
 
@@ -92,6 +99,122 @@ def test_store_ignores_invalid_utf8_and_overwrites_profile_without_appending(tmp
     assert store.read_profile() == "PROFILE_C"
     assert store.read_record() is not None
     assert store.read_record().content == "PROFILE_C"
+
+
+def test_atomic_write_replaces_profile_and_leaves_no_temporary_artifacts(tmp_path):
+    """成功写入在同一 profile 路径完成覆盖，临时文件不会遗留。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    store = UserProfileStore(profile_path)
+
+    store.write_profile("PROFILE_VERSION_A")
+    store.write_profile("PROFILE_VERSION_B")
+
+    assert profile_path.read_text(encoding="utf-8") == "PROFILE_VERSION_B"
+    assert list(profile_path.parent.iterdir()) == [profile_path]
+
+
+def test_write_failure_preserves_old_profile_cleans_temp_and_hides_details(tmp_path, monkeypatch):
+    """准备临时内容失败时，旧 profile 与外部安全错误语义均保持稳定。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    store = UserProfileStore(profile_path)
+    store.write_profile("PROFILE_VERSION_A")
+    temp_path = profile_path.parent / ".write-failure.tmp"
+
+    class _FailingTemporaryFile:
+        name = str(temp_path)
+
+        def __enter__(self):
+            temp_path.touch()
+            return self
+
+        def __exit__(self, _type, _value, _traceback):
+            return False
+
+        def write(self, _content):
+            raise OSError("PRIVATE_WRITE_FAILURE")
+
+    monkeypatch.setattr(user_profile.tempfile, "NamedTemporaryFile", lambda **_kwargs: _FailingTemporaryFile())
+
+    with pytest.raises(UserProfilePersistenceError) as error:
+        store.write_profile("PROFILE_VERSION_B_PRIVATE")
+
+    assert str(error.value) == "user_profile_write_failed"
+    assert str(profile_path) not in str(error.value)
+    assert "PROFILE_VERSION_B_PRIVATE" not in str(error.value)
+    assert profile_path.read_text(encoding="utf-8") == "PROFILE_VERSION_A"
+    assert not temp_path.exists()
+
+
+def test_replace_failure_preserves_old_profile_and_cleans_temp(tmp_path, monkeypatch):
+    """replace 失败不破坏旧文件，也不暴露路径或临时文件信息。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    store = UserProfileStore(profile_path)
+    store.write_profile("PROFILE_VERSION_A")
+
+    def _fail_replace(_source, _target):
+        raise OSError("PRIVATE_REPLACE_FAILURE")
+
+    monkeypatch.setattr(user_profile.os, "replace", _fail_replace)
+
+    with pytest.raises(UserProfilePersistenceError) as error:
+        store.write_profile("PROFILE_VERSION_B_PRIVATE")
+
+    assert str(error.value) == "user_profile_write_failed"
+    assert str(profile_path) not in str(error.value)
+    assert "PROFILE_VERSION_B_PRIVATE" not in str(error.value)
+    assert profile_path.read_text(encoding="utf-8") == "PROFILE_VERSION_A"
+    assert list(profile_path.parent.iterdir()) == [profile_path]
+
+
+def test_initial_replace_failure_creates_no_profile_or_temp_artifact(tmp_path, monkeypatch):
+    """初始写入在 replace 前失败时不产生正式或临时文件。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    store = UserProfileStore(profile_path)
+    monkeypatch.setattr(user_profile.os, "replace", lambda _source, _target: (_ for _ in ()).throw(OSError()))
+
+    with pytest.raises(UserProfilePersistenceError, match="^user_profile_write_failed$"):
+        store.write_profile("PROFILE_VERSION_B_PRIVATE")
+
+    assert not profile_path.exists()
+    assert list(profile_path.parent.iterdir()) == []
+
+
+def test_atomic_writes_use_distinct_same_directory_temporary_files(tmp_path, monkeypatch):
+    """每次写入使用独立且位于 profile 父目录的临时文件。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    store = UserProfileStore(profile_path)
+    original_named_temporary_file = user_profile.tempfile.NamedTemporaryFile
+    temp_names = []
+
+    def _record_temp_name(**kwargs):
+        temp_file = original_named_temporary_file(**kwargs)
+        temp_names.append(Path(temp_file.name))
+        return temp_file
+
+    monkeypatch.setattr(user_profile.tempfile, "NamedTemporaryFile", _record_temp_name)
+
+    store.write_profile("PROFILE_VERSION_A")
+    store.write_profile("PROFILE_VERSION_B")
+
+    assert len(temp_names) == 2
+    assert temp_names[0] != temp_names[1]
+    assert all(path.parent == profile_path.parent for path in temp_names)
+
+
+def test_builtin_does_not_report_success_when_store_persistence_fails(monkeypatch):
+    """保存 Tool 沿用 Store 的安全失败，不把失败伪装成成功。"""
+    class _FailingStore:
+        def write_profile(self, _content: str) -> None:
+            raise UserProfilePersistenceError("user_profile_write_failed")
+
+    monkeypatch.setattr(
+        builtins,
+        "get_user_profile_store",
+        lambda _memory_dir: _FailingStore(),
+    )
+
+    with pytest.raises(UserProfilePersistenceError, match="^user_profile_write_failed$"):
+        builtins.save_user_profile.invoke({"new_content": "PROFILE_PRIVATE"})
 
 
 def test_save_user_profile_delegates_write_to_profile_store(monkeypatch):

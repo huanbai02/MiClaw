@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import tempfile
 
 from .memory import (
     MemoryKind,
@@ -16,6 +18,10 @@ from .memory import (
 
 USER_PROFILE_FILENAME = "user_profile.md"
 USER_PROFILE_MEMORY_ID = "user-profile"
+
+
+class UserProfilePersistenceError(RuntimeError):
+    """表示 profile 持久化失败，避免向调用方暴露路径或内容。"""
 
 
 @dataclass(frozen=True)
@@ -56,13 +62,39 @@ class UserProfileStore:
         )
 
     def write_profile(self, content: str) -> None:
-        """以 UTF-8 整文件覆盖写入 profile，并在需要时创建父目录。
+        """以同目录临时文件和原子 replace 覆盖写入 profile。
 
         Args:
             content: 要保存的完整 Markdown profile 文本。
+
+        Raises:
+            UserProfilePersistenceError: 创建、写入或替换 profile 失败时抛出。
         """
-        self.profile_path.parent.mkdir(parents=True, exist_ok=True)
-        self.profile_path.write_text(content, encoding="utf-8")
+        temp_path: Path | None = None
+        try:
+            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.profile_path.parent,
+                prefix=f".{self.profile_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(content)
+                temp_file.flush()
+
+            os.replace(temp_path, self.profile_path)
+            temp_path = None
+        except OSError:
+            raise UserProfilePersistenceError("user_profile_write_failed") from None
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def get_user_profile_store(memory_dir: Path | str) -> UserProfileStore:

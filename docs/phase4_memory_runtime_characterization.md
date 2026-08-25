@@ -64,11 +64,12 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 save_user_profile(new_content)
     ↓ UserProfileStore.write_profile(new_content)
     ↓ parent.mkdir(parents=True, exist_ok=True)
-    ↓ write_text(..., encoding="utf-8")
+    ↓ 同目录 temporary file 写入、flush、关闭
+    ↓ os.replace(temp, user_profile.md)
     ↓ <WORKSPACE_DIR>/memory/user_profile.md
 ```
 
-该 Tool 以完整文本覆盖旧 profile，不 append、不 merge、不维护历史版本、不自动添加 newline，也没有 atomic write / lock / conflict resolution。成功返回固定中文消息；写入异常会按 Python 当前异常传播到 Tool runtime，函数本身不提供专门的 failure envelope。
+该 Tool 以完整文本覆盖旧 profile，不 append、不 merge、不维护历史版本、不自动添加 newline。单次写入在同目录 temporary file 完整准备后才通过 `os.replace()` 替换目标；失败会尽力清理 temporary file，并以稳定的 `user_profile_write_failed` 错误传播到 Tool runtime。它仍没有 lock、conflict resolution 或 history。
 
 `PermissionCapability.MEMORY_READ` / `MEMORY_WRITE` 已存在于 policy enum，但 `save_user_profile` 当前没有构造 `PermissionRequest`，因此不经过 Phase 2 的 confirmation/session grant/audit 链路。这是当前实现事实，不表示后续设计应继续如此。
 
@@ -141,14 +142,14 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 
 但 profile 会影响模型生成内容。若模型把 profile 内容转写到普通、未命中 sensitive/content 规则的 Tool argument 中，当前 conservative redaction 不是完整 DLP，不能保证业务敏感信息绝不出现在 observability path。Profile 本身也没有专门的 permission、audit、provenance 或 prompt-injection boundary。
 
-固定配置路径避免了由模型提供任意 Memory path 的问题，但当前 Memory writer 直接覆盖该路径，缺少 permission gate、atomic write、concurrency control 和 revision history。
+固定配置路径避免了由模型提供任意 Memory path 的问题，但当前 Memory writer 仍缺少 permission gate、concurrency control 和 revision history；PR 35 的 atomic replace 只保护单次替换，不是完整持久化事务。
 
 ## 10. 当前行为测试覆盖
 
 `tests/test_memory_runtime_characterization.py` 锁定以下现状：
 
 - `MEMORY_DIR` 与 `UserProfileStore.profile_path` 的 workspace-relative 配置关系。
-- `save_user_profile` 创建 UTF-8 profile，并以 complete overwrite 更新它。
+- `save_user_profile` 创建 UTF-8 profile，并以同目录 temporary file + `os.replace()` complete overwrite 更新它；准备或 replace 失败时旧文件保持不变且 temporary artifact 会清理。
 - 缺失 profile 回退为 `暂无记录`，其他 `memory/` sibling file 不会自动读取。
 - profile 全量进入 system prompt，`AgentState.summary` 也进入同一 system prompt。
 - 同一个 Agent app 的每次 node 从 filesystem 重读 profile，文件更新可见；invalid UTF-8 byte 被忽略。
@@ -165,7 +166,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - 只读取一个固定文件，没有 multi-file discovery、排序、retrieval 或 relevance selection。
 - profile 全量 direct concatenation 进 SystemMessage，没有 hard budget、provenance 或 instruction/data boundary。
 - 缺少正式 profile read Tool；现有 write Tool docstring 引用了不存在的 `read_user_profile`。
-- 写入是非原子整文件覆盖，不做 permission/confirmation、locking、revision 或 merge。
+- 写入使用同目录唯一 temporary file，完整写入并关闭后以 `os.replace()` 原子替换正式文件。每次单独写入是原子的；没有 lock、revision、merge 或冲突检测，多个成功 writer 仍是最后完成 replace 的内容生效。这不是数据库事务，也不承诺断电场景的完整 crash consistency。
 - `errors="ignore"` 容忍损坏 UTF-8，但也会静默丢弃 byte。
 - `state.sqlite3` checkpoint、conversation summary 与 profile 文件的职责边界未由独立 Memory API 表达。
 - 当前 redaction 是 observability safety baseline，不是对 profile-derived information 的完整 DLP。
@@ -182,7 +183,7 @@ PR 33+ 在重构时至少需要显式处理：
 2. 区分 profile、conversation checkpoint、summary 与 future task/project memory 的职责。
 3. 避免把 PROJECT root authorization 当作 Memory 自动授权。
 4. 为 retrieval/context injection 定义可验证的 size/token budget 和 provenance。
-5. 为 Memory write 定义 permission、failure、concurrency 与 history 语义，而不是隐式继承当前直接覆写行为。
+5. 为 Memory write 定义 permission、并发冲突与 history 语义；当前只保证单次原子 replace，不处理多 writer 协调。
 
 ## 13. PR 34 结构化语义（不改变持久化或路由）
 
@@ -200,4 +201,4 @@ content   = 原 Markdown 全文
 
 模型词表也可表达带非空 opaque `scope_id` 的 `PROJECT` scope，但 PR 34 没有创建 project storage、没有从路径生成 id、也没有在 PROJECT run 中启用该 route。`read_profile()` 仍保留，并委托 `read_record()` 以保持原字符串 API。
 
-PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boundary；PR 34 只将内部读取表示由 `str` 提升为 `MemoryRecord`，并保持所有 observable behavior 不变。
+PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boundary；PR 34 只将内部读取表示由 `str` 提升为 `MemoryRecord`；PR 35 将写入替换为 atomic replace，并保持其余 observable behavior 不变。
