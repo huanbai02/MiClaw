@@ -1,6 +1,6 @@
 # MiClaw Phase 4：Memory Runtime Characterization
 
-本文记录 PR 32 建立、并由 PR 33 保持的 Memory runtime 行为。PR 33 仅将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；不定义新的通用 `MemoryStore`、retrieval、project isolation 或 context API。
+本文记录 PR 32 建立、由 PR 33/34 保持的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 仅为读取结果补充最小的结构化语义模型，不定义新的通用 `MemoryStore`、retrieval、project isolation 或 context API。
 
 ## 1. 当前 Memory 概览
 
@@ -184,4 +184,20 @@ PR 33+ 在重构时至少需要显式处理：
 4. 为 retrieval/context injection 定义可验证的 size/token budget 和 provenance。
 5. 为 Memory write 定义 permission、failure、concurrency 与 history 语义，而不是隐式继承当前直接覆写行为。
 
-PR 32 建立了以上基线；PR 33 仅抽取 `UserProfileStore` filesystem boundary，并保持这些 observable behavior 不变。
+## 13. PR 34 结构化语义（不改变持久化或路由）
+
+`UserProfileStore.read_record()` 现在将现有非空 `user_profile.md` 映射为不可变 `MemoryRecord`：
+
+```text
+memory_id = "user-profile"
+kind      = USER_PROFILE
+scope     = GLOBAL
+source    = USER_PROFILE_STORE
+content   = 原 Markdown 全文
+```
+
+`source` 仅表示 record 来自 `UserProfileStore` 这一来源通道，不证明内容由用户本人创作。`GLOBAL` 是当前 profile 的逻辑 scope：它不表示不受限权限，也不改变 OFFICE/PROJECT filesystem authorization。模型也不会看到上述 id、scope 或 source；Agent 仅继续使用 `record.content` 组装原有 prompt。
+
+模型词表也可表达带非空 opaque `scope_id` 的 `PROJECT` scope，但 PR 34 没有创建 project storage、没有从路径生成 id、也没有在 PROJECT run 中启用该 route。`read_profile()` 仍保留，并委托 `read_record()` 以保持原字符串 API。
+
+PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boundary；PR 34 只将内部读取表示由 `str` 提升为 `MemoryRecord`，并保持所有 observable behavior 不变。

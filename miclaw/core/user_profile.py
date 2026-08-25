@@ -5,8 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .memory import (
+    MemoryKind,
+    MemoryRecord,
+    MemoryScope,
+    MemoryScopeKind,
+    MemorySource,
+)
+
 
 USER_PROFILE_FILENAME = "user_profile.md"
+USER_PROFILE_MEMORY_ID = "user-profile"
 
 
 @dataclass(frozen=True)
@@ -24,10 +33,27 @@ class UserProfileStore:
         Returns:
             去除首尾空白后的 profile；不存在或为空时返回 None。
         """
+        record = self.read_record()
+        return record.content if record else None
+
+    def read_record(self) -> MemoryRecord | None:
+        """读取当前 profile 并映射为固定语义的全局 MemoryRecord。
+
+        Returns:
+            存在且非空时返回用户画像 record；否则返回 None。
+        """
         if not self.profile_path.exists():
             return None
         content = self.profile_path.read_text(encoding="utf-8", errors="ignore").strip()
-        return content or None
+        if not content:
+            return None
+        return MemoryRecord(
+            memory_id=USER_PROFILE_MEMORY_ID,
+            kind=MemoryKind.USER_PROFILE,
+            scope=MemoryScope(MemoryScopeKind.GLOBAL),
+            source=MemorySource.USER_PROFILE_STORE,
+            content=content,
+        )
 
     def write_profile(self, content: str) -> None:
         """以 UTF-8 整文件覆盖写入 profile，并在需要时创建父目录。

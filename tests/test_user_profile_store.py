@@ -3,7 +3,9 @@
 from pathlib import Path
 
 from miclaw.core.tools import builtins
+from miclaw.core.memory import MemoryKind, MemoryScopeKind, MemorySource
 from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
+from miclaw.core.workspace import reset_active_project_root, set_active_project_root
 
 
 def test_store_owns_fixed_profile_path_under_memory_directory(tmp_path):
@@ -19,11 +21,62 @@ def test_store_reads_existing_profile_and_preserves_current_missing_empty_fallba
     store = UserProfileStore(profile_path)
 
     assert store.read_profile() is None
+    assert store.read_record() is None
     profile_path.parent.mkdir(parents=True)
     profile_path.write_text("\n  PROFILE_A  \n", encoding="utf-8")
     assert store.read_profile() == "PROFILE_A"
     profile_path.write_text(" \n\t", encoding="utf-8")
     assert store.read_profile() is None
+    assert store.read_record() is None
+
+
+def test_store_reads_existing_profile_as_fixed_global_record(tmp_path):
+    """现有 Markdown 文件映射为稳定的 GLOBAL user-profile record。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("PROFILE_MARKER", encoding="utf-8")
+
+    record = UserProfileStore(profile_path).read_record()
+
+    assert record is not None
+    assert record.memory_id == "user-profile"
+    assert record.kind is MemoryKind.USER_PROFILE
+    assert record.scope.kind is MemoryScopeKind.GLOBAL
+    assert record.scope.scope_id is None
+    assert record.source is MemorySource.USER_PROFILE_STORE
+    assert record.content == "PROFILE_MARKER"
+
+
+def test_legacy_read_profile_delegates_to_structured_record(tmp_path):
+    """旧字符串 API 与 read_record 使用同一文件读取语义。"""
+    profile_path = tmp_path / "memory" / "user_profile.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("PROFILE_MARKER", encoding="utf-8")
+    store = UserProfileStore(profile_path)
+
+    record = store.read_record()
+
+    assert record is not None
+    assert store.read_profile() == record.content
+
+
+def test_store_profile_remains_global_while_project_workspace_is_active(tmp_path):
+    """PROJECT workspace 不会激活 project-scoped profile storage。"""
+    profile_path = tmp_path / "workspace" / "memory" / "user_profile.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("GLOBAL_PROFILE_MARKER", encoding="utf-8")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    token = set_active_project_root(project_root)
+    try:
+        record = UserProfileStore(profile_path).read_record()
+    finally:
+        reset_active_project_root(token)
+
+    assert record is not None
+    assert record.scope.kind is MemoryScopeKind.GLOBAL
+    assert record.content == "GLOBAL_PROFILE_MARKER"
 
 
 def test_store_ignores_invalid_utf8_and_overwrites_profile_without_appending(tmp_path):
@@ -37,6 +90,8 @@ def test_store_ignores_invalid_utf8_and_overwrites_profile_without_appending(tmp
 
     profile_path.write_bytes(b"PROFILE_C\xff")
     assert store.read_profile() == "PROFILE_C"
+    assert store.read_record() is not None
+    assert store.read_record().content == "PROFILE_C"
 
 
 def test_save_user_profile_delegates_write_to_profile_store(monkeypatch):

@@ -89,7 +89,8 @@ def create_agent_app(
             active_summary = current_summary
 
         # 读取用户画像
-        profile_content = get_user_profile_store(MEMORY_DIR).read_profile() or "暂无记录"
+        profile_record = get_user_profile_store(MEMORY_DIR).read_record()
+        profile_content = profile_record.content if profile_record else "暂无记录"
 
         sys_prompt = (
             "你是 MiClaw，一个聪明、高效、说话自然的 AI 助手。\n\n"
