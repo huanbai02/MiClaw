@@ -67,6 +67,8 @@ effective GLOBAL/PROJECT user_profile.md
 
 ```text
 save_user_profile(new_content)
+    ↓ explicit Memory write-policy eligibility
+    ↓ scope-aware MEMORY_WRITE permission
     ↓ UserProfileStore.write_profile(new_content)
     ↓ parent.mkdir(parents=True, exist_ok=True)
     ↓ 同目录 temporary file 写入、flush、关闭
@@ -74,7 +76,7 @@ save_user_profile(new_content)
     ↓ <WORKSPACE_DIR>/memory/user_profile.md
 ```
 
-`save_user_profile` 先对同一次 resolved GLOBAL/PROJECT target 构造 `MEMORY_WRITE` request。有效 profile update 使用 MEDIUM risk，默认 ASK；只有 confirmation/session grant 解析为 final ALLOW 后才会创建目录、temporary file 或执行 replace。无 handler、DENY、无效确认均不产生 persistence side effect，并通过既有 permission ToolResult 文本返回阻断。
+`save_user_profile` 先要求 host/runtime 为当前 turn 绑定 `EXPLICIT_USER_REQUEST` lifecycle intent；缺失或异常 intent 会在 permission 前 fail closed，不会创建 directory、temporary file、session grant 或 confirmation。eligible 后才对同一次 resolved GLOBAL/PROJECT target 构造 `MEMORY_WRITE` request。有效 profile update 使用 MEDIUM risk，默认 ASK；只有 confirmation/session grant 解析为 final ALLOW 后才会创建目录、temporary file 或执行 replace。无 handler、DENY、无效确认均不产生 persistence side effect，并通过既有 permission ToolResult 文本返回阻断。
 
 ALLOW 后该 Tool 以完整文本覆盖目标 profile，不 append、不 merge、不维护历史版本、不自动添加 newline。单次写入在同目录 temporary file 完整准备后才通过 `os.replace()` 替换目标；失败会尽力清理 temporary file，并以稳定的 `user_profile_write_failed` 错误传播到 Tool runtime。它仍没有 lock、conflict resolution 或 history。
 

@@ -462,8 +462,12 @@ def render_event(line: str | dict):
     elif event == "ai_message":
         console.print(f"{prefix}[ai_message]✦ {escape(format_ai_message_event(data))}[/ai_message]")
 
-    elif event in {"memory_retrieval", "context_assembly"}:
-        summary = escape(format_log_event_for_cli(data))
+    elif event == "memory_retrieval":
+        summary = escape(format_memory_retrieval_event(data))
+        console.print(f"{prefix}[info]✦ {summary}[/info]")
+
+    elif event == "context_assembly":
+        summary = escape(format_context_assembly_event(data))
         console.print(f"{prefix}[info]✦ {summary}[/info]")
 
     elif event == "system_action":

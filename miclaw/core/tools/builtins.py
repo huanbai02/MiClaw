@@ -11,8 +11,9 @@ from .sandbox_tools import (
     write_office_file,
     execute_office_shell
 )
-from .result import format_tool_result_for_model, tool_permission_blocked
-from ..memory_permissions import authorize_user_profile_write, permission_block_message
+from .result import format_tool_result_for_model, tool_error, tool_permission_blocked
+from ..memory_lifecycle import write_user_profile_with_policy
+from ..memory_permissions import permission_block_message
 from ..permissions import PermissionDecision
 
 
@@ -40,12 +41,24 @@ def save_user_profile(new_content: str) -> str:
     保存或更新当前工作区对应的用户长期画像。
     默认 OFFICE 工作区写入全局画像；PROJECT 工作区写入当前项目范围的画像。
     画像范围由运行时当前工作区决定，不能通过参数自行选择。
-    当你发现用户的偏好发生改变，或者有新的重要事实需要记录时：
+    只有符合当前长期 Memory 写入政策的显式用户请求才可执行，且持久化仍需要权限确认。
+    仅当用户明确要求记住、保存、更新或清除长期画像时：
     1.在你的上下文中，将新信息融入当前完整档案，并删去冲突或过时的旧信息。
     2.将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
     注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
+    不得仅根据模型自行推断的偏好或重要事实调用此工具。
     """
-    authorization = authorize_user_profile_write(MEMORY_DIR)
+    execution = write_user_profile_with_policy(MEMORY_DIR, new_content)
+    if not execution.policy_result.eligible:
+        return format_tool_result_for_model(
+            tool_error(
+                "memory_write_not_eligible",
+                "Memory write is not eligible under current policy.",
+                metadata={"memory_write_policy": execution.policy_result.reason_code},
+            )
+        )
+    authorization = execution.authorization
+    assert authorization is not None
     if authorization.final_result.decision is not PermissionDecision.ALLOW:
         return format_tool_result_for_model(
             tool_permission_blocked(
@@ -54,8 +67,6 @@ def save_user_profile(new_content: str) -> str:
                 metadata={"permission_decision": authorization.final_result.decision.value},
             )
         )
-    authorization.target.store.write_profile(new_content)
-
     return "记忆档案已成功覆写更新。新的人设画像已生效。"
 
 

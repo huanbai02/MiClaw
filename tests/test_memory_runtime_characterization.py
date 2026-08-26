@@ -8,6 +8,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from miclaw.core import agent
 from miclaw.core import config
+from miclaw.core.memory_lifecycle import (
+    MemoryWriteIntent,
+    reset_memory_write_intent,
+    set_memory_write_intent,
+)
 from miclaw.core.tools import builtins
 from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
 from miclaw.core.workspace import reset_active_project_root, set_active_project_root
@@ -90,10 +95,12 @@ def test_save_user_profile_creates_utf8_profile_and_overwrites_previous_content(
     confirmation_token = set_permission_confirmation_handler(
         lambda request, result: PermissionConfirmationChoice.ALLOW_ONCE
     )
+    intent_token = set_memory_write_intent(MemoryWriteIntent.EXPLICIT_USER_REQUEST)
     try:
         assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第一版\n"})
         assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第二版：偏好"})
     finally:
+        reset_memory_write_intent(intent_token)
         reset_permission_confirmation_handler(confirmation_token)
 
     assert profile_path.read_text(encoding="utf-8") == "第二版：偏好"

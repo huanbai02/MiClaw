@@ -8,6 +8,7 @@ import pytest
 from miclaw.core import user_profile
 from miclaw.core.tools import builtins
 from miclaw.core.memory import MemoryKind, MemoryScopeKind, MemorySource
+from miclaw.core.memory_lifecycle import MemoryWriteExecutionResult, MemoryWritePolicyResult
 from miclaw.core.user_profile import (
     UserProfilePersistenceError,
     UserProfileStore,
@@ -204,18 +205,11 @@ def test_atomic_writes_use_distinct_same_directory_temporary_files(tmp_path, mon
 
 
 def test_builtin_does_not_report_success_when_store_persistence_fails(monkeypatch):
-    """保存 Tool 沿用 Store 的安全失败，不把失败伪装成成功。"""
-    class _FailingStore:
-        def write_profile(self, _content: str) -> None:
-            raise UserProfilePersistenceError("user_profile_write_failed")
-
+    """builtin 不吞 lifecycle persistence failure，也不会把失败伪装成成功。"""
     monkeypatch.setattr(
         builtins,
-        "authorize_user_profile_write",
-        lambda _memory_dir: SimpleNamespace(
-            final_result=allow("allowed"),
-            target=SimpleNamespace(store=_FailingStore()),
-        ),
+        "write_user_profile_with_policy",
+        lambda _memory_dir, _content: (_ for _ in ()).throw(UserProfilePersistenceError("user_profile_write_failed")),
     )
 
     with pytest.raises(UserProfilePersistenceError, match="^user_profile_write_failed$"):
@@ -223,19 +217,15 @@ def test_builtin_does_not_report_success_when_store_persistence_fails(monkeypatc
 
 
 def test_save_user_profile_delegates_write_to_profile_store(monkeypatch):
-    """内置 Tool 通过 store 写入，不再自行操作 profile filesystem。"""
+    """内置 Tool 委托 lifecycle service，而非直接操作 profile filesystem。"""
     written = []
-
-    class _RecordingStore:
-        def write_profile(self, content: str) -> None:
-            written.append(content)
 
     monkeypatch.setattr(
         builtins,
-        "authorize_user_profile_write",
-        lambda _memory_dir: SimpleNamespace(
-            final_result=allow("allowed"),
-            target=SimpleNamespace(store=_RecordingStore()),
+        "write_user_profile_with_policy",
+        lambda _memory_dir, content: written.append(content) or MemoryWriteExecutionResult(
+            MemoryWritePolicyResult(True, "explicit_user_request"),
+            SimpleNamespace(final_result=allow("allowed")),
         ),
     )
 

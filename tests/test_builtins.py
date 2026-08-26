@@ -73,15 +73,22 @@ class TestBuiltInTools(unittest.TestCase):
             reset_permission_confirmation_handler,
             set_permission_confirmation_handler,
         )
+        from miclaw.core.memory_lifecycle import (
+            MemoryWriteIntent,
+            reset_memory_write_intent,
+            set_memory_write_intent,
+        )
 
         # 测试保存功能
         test_content = "# 用户档案\n- 姓名：张三\n- 职业：工程师"
         confirmation_token = set_permission_confirmation_handler(
             lambda request, policy: PermissionConfirmationChoice.ALLOW_ONCE
         )
+        intent_token = set_memory_write_intent(MemoryWriteIntent.EXPLICIT_USER_REQUEST)
         try:
             result = save_user_profile.invoke({"new_content": test_content})
         finally:
+            reset_memory_write_intent(intent_token)
             reset_permission_confirmation_handler(confirmation_token)
         self.assertEqual(result, "记忆档案已成功覆写更新。新的人设画像已生效。")
 

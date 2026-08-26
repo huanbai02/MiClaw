@@ -22,6 +22,11 @@ from miclaw.core.memory_permissions import (
     build_memory_permission_request,
     read_authorized_user_profile,
 )
+from miclaw.core.memory_lifecycle import (
+    MemoryWriteIntent,
+    reset_memory_write_intent,
+    set_memory_write_intent,
+)
 from miclaw.core.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
@@ -68,6 +73,16 @@ def disable_global_memory_permission_audit(monkeypatch):
     """避免 focused tests 写入真实 audit log；审计测试会显式替换 logger。"""
     monkeypatch.setattr(memory_permissions, "_permission_audit_logger", lambda *args, **kwargs: None)
     monkeypatch.setattr(memory_permissions, "_permission_confirmation_audit_logger", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def bind_explicit_write_intent_for_permission_regressions():
+    """既有写入 permission 测试只验证第二道 gate，显式绑定第一道 policy intent。"""
+    token = set_memory_write_intent(MemoryWriteIntent.EXPLICIT_USER_REQUEST)
+    try:
+        yield
+    finally:
+        reset_memory_write_intent(token)
 
 
 def _project_context(project_path: Path):

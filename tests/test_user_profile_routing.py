@@ -6,6 +6,11 @@ import pytest
 
 from miclaw.core import user_profile
 from miclaw.core.memory import MemoryScopeKind
+from miclaw.core.memory_lifecycle import (
+    MemoryWriteIntent,
+    reset_memory_write_intent,
+    set_memory_write_intent,
+)
 from miclaw.core.permissions import (
     PermissionConfirmationChoice,
     reset_permission_confirmation_handler,
@@ -177,10 +182,12 @@ def test_builtin_uses_active_project_scope_without_scope_or_path_arguments(tmp_p
     confirmation_token = set_permission_confirmation_handler(
         lambda request, result: PermissionConfirmationChoice.ALLOW_ONCE
     )
+    intent_token = set_memory_write_intent(MemoryWriteIntent.EXPLICIT_USER_REQUEST)
     try:
         result = builtins.save_user_profile.invoke({"new_content": "PROJECT_A_MARKER"})
         project_record = get_user_profile_store(memory_dir).read_record()
     finally:
+        reset_memory_write_intent(intent_token)
         reset_permission_confirmation_handler(confirmation_token)
         reset_active_project_root(token)
 
