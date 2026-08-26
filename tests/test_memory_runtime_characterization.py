@@ -111,8 +111,8 @@ def test_agent_uses_missing_profile_fallback_and_ignores_other_memory_files(tmp_
     assert "OTHER_MEMORY_MARKER" not in prompt
 
 
-def test_agent_injects_full_profile_and_current_summary_into_system_prompt(tmp_path, monkeypatch):
-    """用户画像与 LangGraph summary 都直接拼入 system prompt。"""
+def test_agent_injects_bounded_profile_and_current_summary_into_system_prompt(tmp_path, monkeypatch):
+    """profile/summary 仍进入 system prompt，但 supplemental payload 有字符预算。"""
     memory_dir = tmp_path / "memory"
     memory_dir.mkdir()
     profile = "PROFILE_CONTEXT_MARKER\n" + "x" * 12_000
@@ -120,7 +120,9 @@ def test_agent_injects_full_profile_and_current_summary_into_system_prompt(tmp_p
 
     prompt = _capture_system_prompt(monkeypatch, memory_dir, summary="SUMMARY_CONTEXT_MARKER")
 
-    assert profile in prompt
+    assert profile not in prompt
+    assert "PROFILE_CONTEXT_MARKER" in prompt
+    assert "…[truncated]" in prompt
     assert "SUMMARY_CONTEXT_MARKER" in prompt
     assert "【用户长期画像 (静态偏好)】" in prompt
     assert "[近期对话上下文]" in prompt

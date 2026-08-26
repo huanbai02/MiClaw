@@ -1,6 +1,6 @@
 # MiClaw Phase 4：Memory Runtime Characterization
 
-本文记录 PR 32 建立、由 PR 33–38 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing；PR 38 增加确定性、permission-aware retrieval boundary。本文仍不定义通用 `MemoryStore`、semantic retrieval 或 context API。
+本文记录 PR 32 建立、由 PR 33–39 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing；PR 38 增加确定性、permission-aware retrieval boundary；PR 39 增加有界的 context assembly。本文仍不定义通用 `MemoryStore`、semantic retrieval 或完整 context API。
 
 ## 1. 当前 Memory 概览
 
@@ -57,7 +57,7 @@ effective GLOBAL/PROJECT user_profile.md
 - 空文件经 `.strip()` 后同样回退到 `暂无记录`。
 - `memory/other.md` 等 sibling file 被忽略，不存在 multiple-file ordering 语义。
 - Profile 读取使用 `errors="ignore"`：invalid UTF-8 byte 被丢弃，读取继续，不会因 decoding error 终止 Agent node。
-- 读取使用整文件 `read()`，目前没有字符、token、文件数或 retrieval budget；较大 profile 会整体拼入 prompt。
+- Store 仍使用整文件 `read()`，没有文件数或 retrieval budget；但 ContextAssembler 对注入 prompt 的 summary/profile dynamic content 使用 8000 character supplemental budget。
 
 当前没有专用的 `read_user_profile` Tool。模型通过后续 Agent prompt 自动获得当前 effective profile，或在上下文中保留先前已知内容。
 
@@ -95,7 +95,7 @@ SystemMessage + 保留的近期对话消息
 llm.bind_tools(...).invoke(...)
 ```
 
-Profile 有明确文本 delimiter，但没有独立 provenance model、trust level、instruction/data separation、escaping 或 length/token budget；它以原始文本与 system-level rules 同一条 message 发送。当前 Prompt 对 profile 的描述是“静态偏好”，但没有 runtime enforcement 防止 profile 文本包含指令样内容。
+Profile 有明确文本 delimiter，但没有独立 provenance model、trust level、instruction/data separation 或 escaping；它以原始文本（可能因 supplemental character budget 截断）与 system-level rules 同一条 message 发送。当前 Prompt 对 profile 的描述是“静态偏好”，但没有 runtime enforcement 防止 profile 文本包含指令样内容。
 
 `AgentState.summary` 是另一条 context injection：当 Agent code 调用 `trim_context_messages(raw_messages, trigger_turns=40, keep_turns=10)` 丢弃早期回合时，它让模型生成约 150 字的 summary，并把该 summary 更新到 graph state；下次 node 会在 `[近期对话上下文]` 段直接拼入 system prompt。150 字是 summary prompt 的要求，不是对实际 state 的硬性 runtime length check。
 
@@ -164,7 +164,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - `MEMORY_DIR` 与 `UserProfileStore.profile_path` 的 workspace-relative 配置关系。
 - `save_user_profile` 创建 UTF-8 profile，并以同目录 temporary file + `os.replace()` complete overwrite 更新它；准备或 replace 失败时旧文件保持不变且 temporary artifact 会清理。
 - 缺失 profile 回退为 `暂无记录`，其他 `memory/` sibling file 不会自动读取。
-- profile 全量进入 system prompt，`AgentState.summary` 也进入同一 system prompt。
+- profile 与 `AgentState.summary` 进入同一 system prompt；二者共享 8000 character supplemental budget，summary 优先于 profile。
 - 同一个 Agent app 的每次 node 从 filesystem 重读 profile，文件更新可见；invalid UTF-8 byte 被忽略。
 - PROJECT profile 优先于 GLOBAL fallback；PROJECT write 不会修改 GLOBAL profile。
 - GLOBAL/current PROJECT read 经过 LOW-risk `MEMORY_READ`；write 经过 MEDIUM-risk `MEMORY_WRITE` ASK，只有 final ALLOW 才持久化。
@@ -180,7 +180,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - 仅有 GLOBAL profile 和一个按 canonical project path digest 路由的 PROJECT profile；没有 user/task namespace 或多 record retrieval。
 - 项目移动会改变 PROJECT namespace；当前没有 manifest identity、迁移或 registry。
 - 只读取一个固定文件；没有 multi-file discovery、semantic search、relevance selection 或 multi-record ranking。
-- profile 全量 direct concatenation 进 SystemMessage，没有 hard budget、provenance 或 instruction/data boundary。
+- profile/summary 的注入已有 8000 character supplemental budget，但没有完整 model token-window budget、provenance 或 instruction/data boundary。
 - 缺少正式 profile read Tool；当前 profile 仅通过 Agent prompt 自动注入。
 - 写入使用同目录唯一 temporary file，完整写入并关闭后以 `os.replace()` 原子替换正式文件。每次单独写入是原子的；没有 lock、revision、merge 或冲突检测，多个成功 writer 仍是最后完成 replace 的内容生效。这不是数据库事务，也不承诺断电场景的完整 crash consistency。
 - 仅有 scoped user-profile Memory permission 与固定 USER_PROFILE retrieval；没有 persistent grants、read Tool、semantic retrieval 或通用 Memory authorization framework。
@@ -199,7 +199,7 @@ PR 33+ 在重构时至少需要显式处理：
 1. 兼容已有 `workspace/memory/user_profile.md`，或提供可审计迁移。
 2. 区分 profile、conversation checkpoint、summary 与 future task/project memory 的职责。
 3. 避免把 PROJECT root authorization 当作 Memory 自动授权。
-4. 为 retrieval/context injection 定义可验证的 size/token budget 和 provenance。
+4. 将当前 supplemental character budget 扩展为可验证的 model token-window budget，并定义 provenance。
 5. 为 Memory write 定义 permission、并发冲突与 history 语义；当前只保证单次原子 replace，不处理多 writer 协调。
 
 ## 13. PR 34 结构化语义（不改变持久化或路由）
@@ -225,3 +225,11 @@ PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boun
 `MemoryRetriever` 只接受 host/runtime 构造的 `MemoryRetrievalRequest`，当前唯一支持 `USER_PROFILE`。请求要求 tuple kind 集合、无重复 kind，且 `limit` 为 1–32 的精确整数；空 kind 集合直接返回空 tuple，不触发 permission 或 filesystem access。实际 `USER_PROFILE` retrieval 始终复用 `read_authorized_user_profile()`，因此 PROJECT primary 与独立授权的 GLOBAL fallback 仍只返回一个 effective record，或在阻断时返回空 tuple。
 
 Retriever 返回不可变 tuple，不扫描目录、不做 query、语义搜索、排序或缓存，也不格式化 prompt 或记录 profile 内容。Agent 仍只取该 record 的 `content`，沿用原有 SystemMessage delimiter、summary 顺序与 `暂无记录` fallback。
+
+## 15. PR 39 Context Assembly（Supplemental Character Budget）
+
+Agent 先用 `MemoryRetriever` 取得至多一个 effective `MemoryRecord`，再把 base system rules、profile record 和 `AgentState.summary` 交给纯 `ContextAssembler`，生成单一 `SystemMessage`。Assembler 不读取 filesystem、不做 permission、retrieval、写入、LLM 调用或 observability logging。
+
+`DEFAULT_SUPPLEMENTAL_CONTEXT_CHAR_BUDGET` 为 8000，使用 Python `len()` 的 character count，不等同模型 token budget。该 hard budget 只计 summary 与 profile content；base system rules、固定 section labels/empty/omission markers，以及 retained recent messages 均不计入也不会被截断。summary 优先分配动态预算，profile 使用余量；render order 仍为 base rules、长期画像、近期对话上下文。profile 存在但无余量时显示固定“内容因上下文预算未注入”标记，与不存在 record 时的“暂无记录”区分。
+
+PR 39 不调整 recent-message trimming、summary generation、routing、permission、retrieval、trust/provenance 或 prompt 注入语义；它只是 bounded context baseline，不是完整 tokenizer-aware model-window manager。
