@@ -8,11 +8,11 @@ from typer.testing import CliRunner
 
 from entry import monitor
 from entry.cli import app as cli_app
-from miclaw.core import agent
-import miclaw.core.memory_permissions as memory_permissions
-from miclaw.core.logger import JSONLEventLogger
-from miclaw.core.redaction import DEPTH_LIMIT_REACHED, LARGE_INTEGER_OMITTED, REDACTED
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.observability.logger import JSONLEventLogger
+from miclaw.core.observability.redaction import DEPTH_LIMIT_REACHED, LARGE_INTEGER_OMITTED, REDACTED
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
 
 
 FORBIDDEN_MARKERS = (

@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.logger import build_permission_confirmation_event
-from miclaw.core.permissions import (
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.observability.logger import build_permission_confirmation_event
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionDecision,
@@ -20,7 +20,7 @@ from miclaw.core.permissions import (
     resolve_permission,
     set_session_permission_grants,
 )
-from miclaw.core.tools.sandbox_tools import execute_office_shell, write_office_file
+from miclaw.core.tools.sandbox import execute_office_shell, write_office_file
 
 
 def permission_request(**overrides):

@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 import entry.cli as cli
-import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.logger import build_permission_decision_event
-from miclaw.core.permissions import (
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.observability.logger import build_permission_decision_event
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionDecision,
@@ -25,13 +25,13 @@ from miclaw.core.permissions import (
     set_permission_confirmation_handler,
     set_session_permission_grants,
 )
-from miclaw.core.tools.sandbox_tools import (
+from miclaw.core.tools.sandbox import (
     execute_office_shell,
     list_office_files,
     read_office_file,
     write_office_file,
 )
-from miclaw.core.workspace import (
+from miclaw.core.runtime.workspace import (
     WorkspaceScope,
     get_active_project_root,
     reset_active_project_root,

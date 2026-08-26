@@ -13,8 +13,11 @@ from typer.testing import CliRunner
 
 from entry import monitor
 from entry.cli import app as cli_app
-from miclaw.core import agent, logger as logger_module, memory_permissions, user_profile
-from miclaw.core.context_assembly import (
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+import miclaw.core.memory.user_profile as user_profile
+import miclaw.core.observability.logger as logger_module
+from miclaw.core.agent.context_assembly import (
     MEMORY_DATA_BEGIN,
     MEMORY_DATA_END,
     SUMMARY_DATA_BEGIN,
@@ -23,15 +26,15 @@ from miclaw.core.context_assembly import (
     ContextAssembler,
     ContextAssemblyRequest,
 )
-from miclaw.core.logger import JSONLEventLogger
-from miclaw.core.memory import MemoryKind
-from miclaw.core.memory_lifecycle import (
+from miclaw.core.observability.logger import JSONLEventLogger
+from miclaw.core.memory.models import MemoryKind
+from miclaw.core.memory.lifecycle import (
     MemoryWriteIntent,
     reset_memory_write_intent,
     set_memory_write_intent,
 )
-from miclaw.core.memory_retrieval import MemoryRetrievalRequest, MemoryRetriever
-from miclaw.core.permissions import (
+from miclaw.core.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
+from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     PermissionDecision,
     allow,
@@ -42,9 +45,9 @@ from miclaw.core.permissions import (
     set_session_permission_grants,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
-from miclaw.core.user_profile import UserProfilePersistenceError, UserProfileStore, get_user_profile_store
-from miclaw.core.workspace import WorkspaceRoot, WorkspaceScope, reset_active_project_root, set_active_project_root
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
+from miclaw.core.memory.user_profile import UserProfilePersistenceError, UserProfileStore, get_user_profile_store
+from miclaw.core.runtime.workspace import WorkspaceRoot, WorkspaceScope, reset_active_project_root, set_active_project_root
 
 
 class _CaptureModel:

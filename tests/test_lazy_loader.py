@@ -11,7 +11,7 @@ import importlib
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from miclaw.core.skill_loader import load_dynamic_skills, get_skill_count, reload_skills, clear_skill_cache
+from miclaw.core.skills.loader import load_dynamic_skills, get_skill_count, reload_skills, clear_skill_cache
 
 
 def create_test_skills(test_dir: str, num_skills: int = 5):
@@ -64,11 +64,11 @@ def test_lazy_loading():
     
     try:
         # 重新导入配置以使用测试目录
-        import miclaw.core.config as config_module
+        import miclaw.core.runtime.config as config_module
         importlib.reload(config_module)
         
         # 重新导入 skill_loader 以使用新的 SKILLS_DIR
-        import miclaw.core.skill_loader as skill_loader_module
+        import miclaw.core.skills.loader as skill_loader_module
         importlib.reload(skill_loader_module)
         
         # 清除缓存

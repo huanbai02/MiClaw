@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from miclaw.core.redaction import (
+from miclaw.core.observability.redaction import (
     COLLECTION_ITEMS_OMITTED,
     CONTENT_OMITTED,
     DEPTH_LIMIT_REACHED,

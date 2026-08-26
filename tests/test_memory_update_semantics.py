@@ -4,17 +4,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from miclaw.core import memory_lifecycle, memory_permissions
-from miclaw.core.memory import MemoryKind
-from miclaw.core.memory_lifecycle import (
+import miclaw.core.memory.lifecycle as memory_lifecycle
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.memory.models import MemoryKind
+from miclaw.core.memory.lifecycle import (
     MemoryUpdateDisposition,
     MemoryWriteIntent,
     reset_memory_write_intent,
     set_memory_write_intent,
     write_user_profile_with_policy,
 )
-from miclaw.core.memory_retrieval import MemoryRetrievalRequest, MemoryRetriever
-from miclaw.core.permissions import (
+from miclaw.core.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionDecision,
@@ -25,8 +26,8 @@ from miclaw.core.permissions import (
     set_session_permission_grants,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.memory.user_profile import UserProfileStore, get_user_profile_store
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 @contextmanager

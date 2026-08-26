@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 
 from entry import monitor
-from miclaw.core.config import get_log_file_path
-from miclaw.core.logger import JSONLEventLogger, build_permission_decision_event
-from miclaw.core.permissions import PermissionCapability, PermissionRequest, RiskLevel, allow
+from miclaw.core.runtime.config import get_log_file_path
+from miclaw.core.observability.logger import JSONLEventLogger, build_permission_decision_event
+from miclaw.core.security.permissions import PermissionCapability, PermissionRequest, RiskLevel, allow
 
 
 def test_default_log_path_resolves_under_workspace(tmp_path):

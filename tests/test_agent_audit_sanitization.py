@@ -3,11 +3,11 @@ import json
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
-from miclaw.core import agent
-import miclaw.core.memory_permissions as memory_permissions
-from miclaw.core.logger import JSONLEventLogger
-from miclaw.core.redaction import CONTENT_OMITTED, REDACTED, REDACTION_FAILED, summarize_tool_args
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.observability.logger import JSONLEventLogger
+from miclaw.core.observability.redaction import CONTENT_OMITTED, REDACTED, REDACTION_FAILED, summarize_tool_args
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
 
 
 class _SequentialModel:

@@ -8,14 +8,14 @@ import os
 from pathlib import Path
 import tempfile
 
-from .memory import (
+from .models import (
     MemoryKind,
     MemoryRecord,
     MemoryScope,
     MemoryScopeKind,
     MemorySource,
 )
-from .workspace import WorkspaceRoot, WorkspaceScope, get_active_project_root
+from ..runtime.workspace import WorkspaceRoot, WorkspaceScope, get_active_project_root
 
 
 USER_PROFILE_FILENAME = "user_profile.md"

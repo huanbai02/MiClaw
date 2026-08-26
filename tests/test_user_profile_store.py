@@ -5,17 +5,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from miclaw.core import user_profile
+import miclaw.core.memory.user_profile as user_profile
 from miclaw.core.tools import builtins
-from miclaw.core.memory import MemoryKind, MemoryScopeKind, MemorySource
-from miclaw.core.memory_lifecycle import MemoryWriteExecutionResult, MemoryWritePolicyResult
-from miclaw.core.user_profile import (
+from miclaw.core.memory.models import MemoryKind, MemoryScopeKind, MemorySource
+from miclaw.core.memory.lifecycle import MemoryWriteExecutionResult, MemoryWritePolicyResult
+from miclaw.core.memory.user_profile import (
     UserProfilePersistenceError,
     UserProfileStore,
     get_user_profile_store,
 )
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
-from miclaw.core.permissions import allow
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.security.permissions import allow
 
 
 def test_store_owns_fixed_profile_path_under_memory_directory(tmp_path):

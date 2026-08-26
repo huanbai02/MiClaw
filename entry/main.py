@@ -12,11 +12,11 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
 from prompt_toolkit.application import get_app
 
-from miclaw.core.agent import create_agent_app
-from miclaw.core.config import DB_PATH
-from miclaw.core.bus import task_queue
-from miclaw.core.heartbeat import pacemaker_loop
-from miclaw.core.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
+from miclaw.core.agent.graph import create_agent_app
+from miclaw.core.runtime.config import DB_PATH
+from miclaw.core.runtime.bus import task_queue
+from miclaw.core.scheduler.heartbeat import pacemaker_loop
+from miclaw.core.observability.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')

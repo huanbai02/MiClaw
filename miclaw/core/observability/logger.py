@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .config import get_log_file_path
+from ..runtime.config import get_log_file_path
 from .trace import get_current_trace_context
 
 # 内存队列 + 守护线程
@@ -34,7 +34,7 @@ class JSONLEventLogger:
                 cls._instance = super().__new__(cls)
                 cls._instance._init_logger()
             return cls._instance
-        
+
     def _init_logger(
         self,
         log_dir: str | Path | None = None,

@@ -6,17 +6,17 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from miclaw.core import agent
-from miclaw.core import config
-from miclaw.core.memory_lifecycle import (
+import miclaw.core.agent.graph as agent
+import miclaw.core.runtime.config as config
+from miclaw.core.memory.lifecycle import (
     MemoryWriteIntent,
     reset_memory_write_intent,
     set_memory_write_intent,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
-from miclaw.core.permissions import (
+from miclaw.core.memory.user_profile import UserProfileStore, get_user_profile_store
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     reset_permission_confirmation_handler,
     set_permission_confirmation_handler,

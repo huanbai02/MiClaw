@@ -13,8 +13,8 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 
 
-from miclaw.core.provider import get_provider
-from miclaw.core.context import AgentState
+from miclaw.core.llm.provider import get_provider
+from miclaw.core.agent.context import AgentState
 
 
 SCENARIOS = [

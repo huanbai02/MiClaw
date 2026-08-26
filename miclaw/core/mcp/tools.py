@@ -15,9 +15,9 @@ from typing import Any
 from langchain_core.runnables import ensure_config
 from langchain_core.tools import BaseTool
 
-from .mcp_adapter import MCPToolDescriptor
-from .mcp_client import MCPStdioClient, MCPStdioServerConfig
-from .tools.result import format_tool_result_for_model, tool_error
+from .adapter import MCPToolDescriptor
+from .client import MCPStdioClient, MCPStdioServerConfig
+from ..tools.result import format_tool_result_for_model, tool_error
 
 
 MAX_AGENT_TOOL_NAME_LENGTH = 64

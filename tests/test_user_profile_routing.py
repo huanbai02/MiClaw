@@ -4,27 +4,27 @@ from pathlib import Path
 
 import pytest
 
-from miclaw.core import user_profile
-from miclaw.core.memory import MemoryScopeKind
-from miclaw.core.memory_lifecycle import (
+import miclaw.core.memory.user_profile as user_profile
+from miclaw.core.memory.models import MemoryScopeKind
+from miclaw.core.memory.lifecycle import (
     MemoryWriteIntent,
     reset_memory_write_intent,
     set_memory_write_intent,
 )
-from miclaw.core.permissions import (
+from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     reset_permission_confirmation_handler,
     set_permission_confirmation_handler,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.user_profile import (
+from miclaw.core.memory.user_profile import (
     UserProfilePersistenceError,
     UserProfileRoutingError,
     UserProfileStore,
     derive_project_memory_id,
     get_user_profile_store,
 )
-from miclaw.core.workspace import WorkspaceRoot, WorkspaceScope
+from miclaw.core.runtime.workspace import WorkspaceRoot, WorkspaceScope
 
 
 def _project_root(path: Path) -> WorkspaceRoot:
@@ -171,7 +171,7 @@ def test_unsupported_workspace_scope_fails_closed(tmp_path):
 
 def test_builtin_uses_active_project_scope_without_scope_or_path_arguments(tmp_path, monkeypatch):
     """builtin scope 完全取自 host 的 active PROJECT context，而非模型参数。"""
-    from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+    from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
     memory_dir = tmp_path / "memory"
     project_path = tmp_path / "project-a"

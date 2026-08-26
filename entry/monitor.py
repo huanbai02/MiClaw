@@ -11,8 +11,8 @@ from rich.align import Align
 from rich import box
 from datetime import datetime
 
-from miclaw.core.config import get_log_file_path
-from miclaw.core.redaction import REDACTED, sanitize_value, summarize_content, summarize_tool_args
+from miclaw.core.runtime.config import get_log_file_path
+from miclaw.core.observability.redaction import REDACTED, sanitize_value, summarize_content, summarize_tool_args
 
 
 miclaw_theme = Theme({

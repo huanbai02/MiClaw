@@ -11,14 +11,15 @@ from typer.testing import CliRunner
 
 from entry import monitor
 from entry.cli import app as cli_app
-from miclaw.core import agent, memory_permissions
-from miclaw.core.context_assembly import ContextAssembler, ContextAssemblyRequest
-from miclaw.core.logger import JSONLEventLogger
-from miclaw.core.memory import MemoryKind, MemoryRecord, MemoryScope, MemoryScopeKind, MemorySource
-from miclaw.core.permissions import deny
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
-from miclaw.core.user_profile import UserProfileStore
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.agent.context_assembly import ContextAssembler, ContextAssemblyRequest
+from miclaw.core.observability.logger import JSONLEventLogger
+from miclaw.core.memory.models import MemoryKind, MemoryRecord, MemoryScope, MemoryScopeKind, MemorySource
+from miclaw.core.security.permissions import deny
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
+from miclaw.core.memory.user_profile import UserProfileStore
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 class _CaptureModel:

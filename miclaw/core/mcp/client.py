@@ -19,18 +19,18 @@ import anyio
 from mcp import Client, StdioServerParameters, types as mcp_types
 from mcp.client.stdio import stdio_client
 
-from .mcp_adapter import (
+from .adapter import (
     MCPAdapterError,
     MCPToolDescriptor,
     adapt_mcp_tools,
     validate_mcp_server_id,
 )
-from .mcp_permissions import authorize_mcp_tool
-from .permissions import (
+from .permissions import authorize_mcp_tool
+from ..security.permissions import (
     PermissionConfirmationHandler,
     PermissionDecision,
 )
-from .tools.result import ToolResult, tool_error, tool_permission_blocked, tool_success
+from ..tools.result import ToolResult, tool_error, tool_permission_blocked, tool_success
 
 
 MCP_PROTOCOL_VERSION = "2026-07-28"

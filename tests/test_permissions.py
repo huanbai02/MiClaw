@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from miclaw.core.permissions import (
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionDecision,
     PermissionRequest,
@@ -14,7 +14,7 @@ from miclaw.core.permissions import (
     evaluate_permission,
     resolve_permission,
 )
-from miclaw.core.workspace import WorkspaceScope
+from miclaw.core.runtime.workspace import WorkspaceScope
 
 
 def request_for(capability, risk_level=RiskLevel.LOW):

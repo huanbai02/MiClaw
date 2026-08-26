@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .logger import log_permission_confirmation, log_permission_decision
-from .memory import MemoryRecord, MemoryScopeKind
-from .permissions import (
+from ..observability.logger import log_permission_confirmation, log_permission_decision
+from .models import MemoryRecord, MemoryScopeKind
+from ..security.permissions import (
     PermissionCapability,
     PermissionDecision,
     PermissionRequest,
@@ -18,7 +18,7 @@ from .permissions import (
     resolve_permission,
 )
 from .user_profile import UserProfileStore, derive_project_memory_id, get_user_profile_store
-from .workspace import get_active_project_root
+from ..runtime.workspace import get_active_project_root
 
 
 @dataclass(frozen=True)

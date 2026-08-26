@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from miclaw.core import agent, memory_lifecycle, memory_permissions
-from miclaw.core.memory import MemoryKind, MemoryScope, MemoryScopeKind
-from miclaw.core.memory_lifecycle import (
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.lifecycle as memory_lifecycle
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.memory.models import MemoryKind, MemoryScope, MemoryScopeKind
+from miclaw.core.memory.lifecycle import (
     MemoryWriteIntent,
     MemoryWriteRequest,
     MemoryWriteSource,
@@ -19,8 +21,8 @@ from miclaw.core.memory_lifecycle import (
     set_memory_write_intent,
     write_user_profile_with_policy,
 )
-from miclaw.core.memory_retrieval import MemoryRetrievalRequest, MemoryRetriever
-from miclaw.core.permissions import (
+from miclaw.core.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
+from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     PermissionDecision,
     reset_permission_confirmation_handler,
@@ -29,8 +31,8 @@ from miclaw.core.permissions import (
     set_session_permission_grants,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.user_profile import UserProfileRoutingError, UserProfileStore, get_user_profile_store
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.memory.user_profile import UserProfileRoutingError, UserProfileStore, get_user_profile_store
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 class _SequentialModel:

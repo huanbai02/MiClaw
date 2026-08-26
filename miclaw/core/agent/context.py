@@ -5,7 +5,7 @@ from langgraph.graph.message import add_messages
 class AgentState(TypedDict):
     # 存储对话历史。
     messages: Annotated[list[BaseMessage], add_messages]
-    
+
     # 摘要压缩
     summary: str
 
@@ -16,7 +16,7 @@ def trim_context_messages(messages: list[BaseMessage], trigger_turns: int = 8, k
 
     if not non_system_msgs:
         return ([first_system] if first_system else []), []
-    
+
     turns: list[list[BaseMessage]] = []
     current_turn: list[BaseMessage] = []
 
@@ -29,7 +29,7 @@ def trim_context_messages(messages: list[BaseMessage], trigger_turns: int = 8, k
         else:
             if current_turn:
                 current_turn.append(msg)
-    
+
     # 保存最后一个回合
     if current_turn:
         turns.append(current_turn)
@@ -39,7 +39,7 @@ def trim_context_messages(messages: list[BaseMessage], trigger_turns: int = 8, k
     if total_turns < trigger_turns:
         final_messages = ([first_system] if first_system else []) + non_system_msgs
         return final_messages, []
-    
+
     recent_turns = turns[-keep_turns:]
     discarded_turns = turns[:-keep_turns]
 
@@ -54,5 +54,3 @@ def trim_context_messages(messages: list[BaseMessage], trigger_turns: int = 8, k
         discarded_messages.extend(turn)
 
     return final_messages, discarded_messages
-
-    

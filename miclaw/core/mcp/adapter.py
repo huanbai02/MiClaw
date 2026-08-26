@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any
 
-from .redaction import REDACTED, sanitize_value
+from ..observability.redaction import REDACTED, sanitize_value
 
 
 MAX_IDENTITY_LENGTH = 80

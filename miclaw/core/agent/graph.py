@@ -4,15 +4,15 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from .context import AgentState, trim_context_messages
-from .provider import get_provider
-from .tools.builtins import BUILTIN_TOOLS
-from .logger import audit_logger
-from .redaction import summarize_content, summarize_tool_args
-from .config import MEMORY_DIR
-from .memory import MemoryKind
-from .memory_retrieval import MemoryRetrievalOutcome, MemoryRetrievalRequest, MemoryRetriever
+from ..llm.provider import get_provider
+from ..tools.builtins import BUILTIN_TOOLS
+from ..observability.logger import audit_logger
+from ..observability.redaction import summarize_content, summarize_tool_args
+from ..runtime.config import MEMORY_DIR
+from ..memory.models import MemoryKind
+from ..memory.retrieval import MemoryRetrievalOutcome, MemoryRetrievalRequest, MemoryRetriever
 from .context_assembly import ContextAssembler, ContextAssemblyRequest, ContextAssemblyResult
-from .skill_loader import load_dynamic_skills
+from ..skills.loader import load_dynamic_skills
 from langchain_core.runnables import RunnableConfig
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import ANSI
@@ -82,8 +82,8 @@ def create_agent_app(
         actual_tools = BUILTIN_TOOLS + dynamic_tools
     else:
         actual_tools = tools
-    
-    
+
+
     tool_node = ToolNode(actual_tools)
 
     llm = get_provider(provider_name=provider_name, model_name=model_name)
@@ -123,7 +123,7 @@ def create_agent_app(
             import sys
             print_formatted_text(ANSI("\033[K \033[38;5;141m ● 正在更新上下文记忆... \033[0m"))
             discarded_text = "\n".join([f"{m.type}: {m.content}" for m in discarded_msgs if m.content])
-        
+
             summary_prompt = (
                     f"你是一个负责维护 AI 工作台上下文的后台模块。\n\n"
                     f"【现有的交接文档】\n{current_summary if current_summary else '暂无记录'}\n\n"
@@ -133,7 +133,7 @@ def create_agent_app(
                     f"严格警告：只记录'我们在聊什么'、'解决了什么问题'、'得出了什么结论'等。绝对不要记录用户的静态偏好(如姓名、职业、爱好等)，这部分由其他模块负责！\n"
                     f"要求：客观、精简，不要输出任何解释性废话，直接返回最新的记忆文本，总字数不要超过150字"
                 )
-        
+
             # 这里可以用便宜模型
             new_summary_response = llm.invoke([HumanMessage(content=summary_prompt)], config={"callbacks":[]})
             active_summary = new_summary_response.content

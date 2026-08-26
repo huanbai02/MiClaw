@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from miclaw.core import memory_permissions
-from miclaw.core.context_assembly import (
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.agent.context_assembly import (
     ESCAPED_BOUNDARY_MARKER,
     HISTORICAL_CONTEXT_POLICY,
     MEMORY_DATA_BEGIN,
@@ -16,10 +16,10 @@ from miclaw.core.context_assembly import (
     ContextAssembler,
     ContextAssemblyRequest,
 )
-from miclaw.core.memory import MemoryKind, MemoryRecord, MemoryScope, MemoryScopeKind, MemorySource
-from miclaw.core.memory_retrieval import MemoryRetrievalRequest, MemoryRetriever
-from miclaw.core.user_profile import UserProfileStore
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.memory.models import MemoryKind, MemoryRecord, MemoryScope, MemoryScopeKind, MemorySource
+from miclaw.core.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
+from miclaw.core.memory.user_profile import UserProfileStore
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 BASE_PROMPT = "SYSTEM_RULE_MARKER: current runtime rules"

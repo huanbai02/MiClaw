@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from .memory import MemoryKind, MemoryScope, MemoryScopeKind
-from .memory_permissions import MemoryAuthorization, ResolvedUserProfileTarget, authorize_memory_access, resolve_user_profile_target
-from .permissions import PermissionDecision
+from .models import MemoryKind, MemoryScope, MemoryScopeKind
+from .permissions import MemoryAuthorization, ResolvedUserProfileTarget, authorize_memory_access, resolve_user_profile_target
+from ..security.permissions import PermissionDecision
 
 
 class MemoryWriteIntent(str, Enum):

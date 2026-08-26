@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .memory import MemoryKind, MemoryRecord
-from .memory_permissions import (
+from .models import MemoryKind, MemoryRecord
+from .permissions import (
     read_authorized_user_profile,
     read_authorized_user_profile_with_outcome,
 )

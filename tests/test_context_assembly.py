@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from miclaw.core import agent, memory_permissions
-from miclaw.core.context_assembly import (
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.agent.context_assembly import (
     DEFAULT_SUPPLEMENTAL_CONTEXT_CHAR_BUDGET,
     HISTORICAL_CONTEXT_POLICY,
     MEMORY_DATA_BEGIN,
@@ -22,9 +23,9 @@ from miclaw.core.context_assembly import (
     ContextAssemblyRequest,
     truncate_context_content,
 )
-from miclaw.core.memory import MemoryKind, MemoryRecord, MemoryScope, MemoryScopeKind, MemorySource
-from miclaw.core.permissions import deny
-from miclaw.core.user_profile import UserProfileStore
+from miclaw.core.memory.models import MemoryKind, MemoryRecord, MemoryScope, MemoryScopeKind, MemorySource
+from miclaw.core.security.permissions import deny
+from miclaw.core.memory.user_profile import UserProfileStore
 
 
 BASE_PROMPT = "BASE_SYSTEM_RULES"

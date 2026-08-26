@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from miclaw.core import agent, memory_permissions, memory_retrieval
-from miclaw.core.memory import MemoryKind, MemoryScopeKind
-from miclaw.core.memory_retrieval import MemoryRetrievalRequest, MemoryRetriever
-from miclaw.core.permissions import deny
-from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+import miclaw.core.memory.retrieval as memory_retrieval
+from miclaw.core.memory.models import MemoryKind, MemoryScopeKind
+from miclaw.core.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
+from miclaw.core.security.permissions import deny
+from miclaw.core.memory.user_profile import UserProfileStore, get_user_profile_store
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 class _CaptureModel:

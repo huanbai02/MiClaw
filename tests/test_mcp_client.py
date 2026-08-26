@@ -9,20 +9,20 @@ import pytest
 from mcp import types as mcp_types
 
 from entry.monitor import format_log_event_for_cli, get_trace_events
-import miclaw.core.mcp_client as mcp_client
-import miclaw.core.mcp_permissions as mcp_permissions
-from miclaw.core.logger import (
+import miclaw.core.mcp.client as mcp_client
+import miclaw.core.mcp.permissions as mcp_permissions
+from miclaw.core.observability.logger import (
     JSONLEventLogger,
     build_permission_confirmation_event,
     build_permission_decision_event,
 )
-from miclaw.core.mcp_adapter import MCPAdapterError, MCPToolDescriptor
-from miclaw.core.mcp_client import (
+from miclaw.core.mcp.adapter import MCPAdapterError, MCPToolDescriptor
+from miclaw.core.mcp.client import (
     MCPClientError,
     MCPStdioClient,
     MCPStdioServerConfig,
 )
-from miclaw.core.permissions import (
+from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     PermissionDecision,
     PermissionResult,
@@ -30,7 +30,7 @@ from miclaw.core.permissions import (
     reset_session_permission_grants,
     set_session_permission_grants,
 )
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
 
 
 SERVER_SCRIPT = Path(__file__).parent / "fixtures" / "mcp_test_server.py"

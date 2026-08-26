@@ -14,9 +14,9 @@ from .result import (
     tool_permission_blocked,
     tool_success,
 )
-from ..config import OFFICE_DIR
-from ..logger import log_permission_confirmation, log_permission_decision
-from ..permissions import (
+from ..runtime.config import OFFICE_DIR
+from ..observability.logger import log_permission_confirmation, log_permission_decision
+from ..security.permissions import (
     PermissionCapability,
     PermissionDecision,
     PermissionRequest,
@@ -26,7 +26,7 @@ from ..permissions import (
     get_permission_confirmation_handler,
     resolve_permission,
 )
-from ..workspace import WorkspaceRoot, WorkspaceScope, get_active_project_root
+from ..runtime.workspace import WorkspaceRoot, WorkspaceScope, get_active_project_root
 
 SYS_OS = platform.system()
 _permission_evaluator = evaluate_permission

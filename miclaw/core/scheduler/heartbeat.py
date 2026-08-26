@@ -3,8 +3,8 @@ import json
 import asyncio
 import calendar
 from datetime import datetime, timedelta
-from .config import TASKS_FILE
-from .tools.builtins import tasks_lock
+from ..runtime.config import TASKS_FILE
+from ..tools.builtins import tasks_lock
 
 async def pacemaker_loop(task_queue: asyncio.Queue, check_interval: int = 10):
     """
@@ -12,10 +12,10 @@ async def pacemaker_loop(task_queue: asyncio.Queue, check_interval: int = 10):
     """
     while True:
         await asyncio.sleep(check_interval)
-        
+
         if not os.path.exists(TASKS_FILE):
             continue
-            
+
         now = datetime.now()
         pending_tasks = []
         triggered_tasks = []
@@ -30,7 +30,7 @@ async def pacemaker_loop(task_queue: asyncio.Queue, check_interval: int = 10):
                     tasks = json.loads(content)
             except Exception:
                 continue
-                
+
             if not tasks:
                 continue
 
@@ -46,7 +46,7 @@ async def pacemaker_loop(task_queue: asyncio.Queue, check_interval: int = 10):
                         repeat_freq = t.get("repeat")
                         if repeat_freq:
                             repeat_count = t.get("repeat_count")
-                            
+
 
                             if repeat_count is not None:
                                 if repeat_count <= 1:
@@ -72,7 +72,7 @@ async def pacemaker_loop(task_queue: asyncio.Queue, check_interval: int = 10):
                                 next_dt = target_dt.replace(year=year, month=month, day=day)
                             else:
                                 continue
-                                
+
                             t["target_time"] = next_dt.strftime("%Y-%m-%d %H:%M:%S")
                             pending_tasks.append(t)
                     else:

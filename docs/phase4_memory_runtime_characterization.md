@@ -15,7 +15,7 @@
 
 ### 根路径与自动创建
 
-`miclaw/core/config.py` 在 import 时解析：
+`miclaw/core/runtime/config.py` 在 import 时解析：
 
 ```text
 WORKSPACE_DIR = $MICLAW_WORKSPACE 或 <project>/workspace
@@ -30,11 +30,11 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 
 每个 `user_profile.md` 都是任意 UTF-8 Markdown 文本，没有 front matter、record schema、version、分段约定或文件大小限制。Agent 每次只选择一个 effective profile：OFFICE 为 GLOBAL；PROJECT 为非空 PROJECT profile，缺失时只读回退 GLOBAL。其他 `.md` 文件不会自动进入 prompt。
 
-正常运行中 workspace 由环境变量在 import 前决定；当前没有 runtime workspace switching API。`agent.py` 与 `builtins.py` 仍在 import 时取得 `MEMORY_DIR`，因此若进程内显式 reload `miclaw.core.config`，这些已导入模块不会自动切换到新的 Memory root。这是当前 module-level config binding 的限制；`UserProfileStore` 本身不缓存内容。
+正常运行中 workspace 由环境变量在 import 前决定；当前没有 runtime workspace switching API。`agent/graph.py` 与 `tools/builtins.py` 仍在 import 时取得 `MEMORY_DIR`，因此若进程内显式 reload `miclaw.core.runtime.config`，这些已导入模块不会自动切换到新的 Memory root。这是当前 module-level config binding 的限制；`UserProfileStore` 本身不缓存内容。
 
 ## 3. Read Path
 
-显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.create_agent_app()` 内部的 `agent_node`，它通过 `MemoryRetriever` 读取：
+显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.graph.create_agent_app()` 内部的 `agent_node`，它通过 `MemoryRetriever` 读取：
 
 ```text
 effective GLOBAL/PROJECT user_profile.md

@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from miclaw.core.memory import (
+from miclaw.core.memory.models import (
     MemoryKind,
     MemoryRecord,
     MemoryScope,

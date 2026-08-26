@@ -4,7 +4,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+# config.py 从 core/ 移入 runtime/ 后，先回到原 core 层再沿用既有根目录推导。
+CORE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKAGE_DIR = os.path.dirname(CORE_DIR)
 PROJECT_ROOT = os.path.dirname(PACKAGE_DIR)
 

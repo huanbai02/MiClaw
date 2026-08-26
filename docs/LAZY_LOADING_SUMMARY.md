@@ -197,7 +197,7 @@ def _extract_metadata(self, md_path: str) -> Optional[Dict[str, str]]:
 ### 基本使用（向后兼容）
 
 ```python
-from miclaw.core.skill_loader import load_dynamic_skills
+from miclaw.core.skills.loader import load_dynamic_skills
 
 # 与之前完全相同的使用方式
 tools = load_dynamic_skills()
@@ -206,7 +206,7 @@ tools = load_dynamic_skills()
 ### 高级使用
 
 ```python
-from miclaw.core.skill_loader import (
+from miclaw.core.skills.loader import (
     load_dynamic_skills,
     reload_skills,
     get_skill_count,

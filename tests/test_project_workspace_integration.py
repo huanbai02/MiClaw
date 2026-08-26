@@ -7,13 +7,13 @@ import pytest
 from typer.testing import CliRunner
 
 import entry.cli as cli
-import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.logger import (
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.observability.logger import (
     JSONLEventLogger,
     build_permission_confirmation_event,
     build_permission_decision_event,
 )
-from miclaw.core.permissions import (
+from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     PermissionDecision,
     evaluate_permission,
@@ -24,14 +24,14 @@ from miclaw.core.permissions import (
     set_permission_confirmation_handler,
     set_session_permission_grants,
 )
-from miclaw.core.tools.sandbox_tools import (
+from miclaw.core.tools.sandbox import (
     execute_office_shell,
     list_office_files,
     read_office_file,
     write_office_file,
 )
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
-from miclaw.core.workspace import (
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
+from miclaw.core.runtime.workspace import (
     WorkspaceScope,
     get_active_project_root,
     reset_active_project_root,

@@ -10,8 +10,8 @@ from rich.status import Status
 from dotenv import set_key, load_dotenv, unset_key
 import sys
 
-from miclaw.core.provider import get_provider
-from miclaw.core.permissions import (
+from miclaw.core.llm.provider import get_provider
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionRequest,
@@ -21,7 +21,7 @@ from miclaw.core.permissions import (
     set_permission_confirmation_handler,
     set_session_permission_grants,
 )
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 from langchain_core.messages import HumanMessage
 
 ENTRY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -342,7 +342,7 @@ def list_skills_command():
 
     # config 初始化仍会输出绝对 workspace path，此处仅隔离 import side effect。
     with redirect_stdout(StringIO()):
-        from miclaw.core.skill_loader import list_skill_metadata
+        from miclaw.core.skills.loader import list_skill_metadata
 
     skills = list_skill_metadata()
     if not skills:
@@ -365,7 +365,7 @@ def lint_skills_command():
     from io import StringIO
 
     with redirect_stdout(StringIO()):
-        from miclaw.core.skill_loader import validate_skills
+        from miclaw.core.skills.loader import validate_skills
 
     results = validate_skills()
     if not results:

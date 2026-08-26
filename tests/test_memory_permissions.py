@@ -6,28 +6,28 @@ from pathlib import Path
 import pytest
 
 import entry.cli as cli
-import miclaw.core.memory_permissions as memory_permissions
-from miclaw.core import user_profile
+import miclaw.core.memory.permissions as memory_permissions
+import miclaw.core.memory.user_profile as user_profile
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from miclaw.core.logger import (
+from miclaw.core.observability.logger import (
     JSONLEventLogger,
     build_permission_confirmation_event,
     build_permission_decision_event,
 )
-from miclaw.core.memory import MemoryScopeKind
-from miclaw.core.memory_permissions import (
+from miclaw.core.memory.models import MemoryScopeKind
+from miclaw.core.memory.permissions import (
     ResolvedUserProfileTarget,
     authorize_memory_access,
     authorize_user_profile_write,
     build_memory_permission_request,
     read_authorized_user_profile,
 )
-from miclaw.core.memory_lifecycle import (
+from miclaw.core.memory.lifecycle import (
     MemoryWriteIntent,
     reset_memory_write_intent,
     set_memory_write_intent,
 )
-from miclaw.core.permissions import (
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionDecision,
@@ -42,9 +42,9 @@ from miclaw.core.permissions import (
     set_session_permission_grants,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
-from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
+from miclaw.core.memory.user_profile import UserProfileStore, get_user_profile_store
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 class _CaptureModel:
@@ -520,7 +520,7 @@ def test_memory_permission_prompt_and_audit_are_content_and_path_safe(tmp_path, 
 
 def test_agent_denied_memory_read_uses_existing_empty_profile_fallback(tmp_path, monkeypatch):
     """Agent 在 MEMORY_READ DENY 时不读 profile content，继续使用“暂无记录”。"""
-    from miclaw.core import agent
+    import miclaw.core.agent.graph as agent
 
     memory_dir = tmp_path / "memory"
     _global_store(memory_dir).write_profile("PROFILE_SECRET_MARKER")

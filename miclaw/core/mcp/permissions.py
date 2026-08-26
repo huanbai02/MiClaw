@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .logger import log_permission_confirmation, log_permission_decision
-from .mcp_adapter import MCPToolDescriptor
-from .permissions import (
+from ..observability.logger import log_permission_confirmation, log_permission_decision
+from .adapter import MCPToolDescriptor
+from ..security.permissions import (
     PermissionCapability,
     PermissionConfirmationHandler,
     PermissionDecision,

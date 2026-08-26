@@ -5,8 +5,8 @@ import pytest
 from typer.testing import CliRunner
 
 from entry.cli import app
-from miclaw.core import skill_loader
-from miclaw.core.skill_loader import _match_metadata_field
+import miclaw.core.skills.loader as skill_loader
+from miclaw.core.skills.loader import _match_metadata_field
 
 
 runner = CliRunner()

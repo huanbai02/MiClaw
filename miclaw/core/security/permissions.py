@@ -12,7 +12,7 @@ from enum import Enum
 import re
 from typing import Any, Protocol
 
-from .workspace import WorkspaceScope
+from ..runtime.workspace import WorkspaceScope
 
 
 _MCP_TOOL_TARGET_PATTERN = re.compile(

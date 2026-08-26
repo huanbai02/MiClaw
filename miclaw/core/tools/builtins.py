@@ -4,17 +4,17 @@ import os
 import json
 import uuid
 import threading
-from ..config import MEMORY_DIR, TASKS_FILE
-from .sandbox_tools import (
+from ..runtime.config import MEMORY_DIR, TASKS_FILE
+from .sandbox import (
     list_office_files,
     read_office_file,
     write_office_file,
     execute_office_shell
 )
 from .result import format_tool_result_for_model, tool_error, tool_permission_blocked
-from ..memory_lifecycle import MemoryUpdateDisposition, write_user_profile_with_policy
-from ..memory_permissions import permission_block_message
-from ..permissions import PermissionDecision
+from ..memory.lifecycle import MemoryUpdateDisposition, write_user_profile_with_policy
+from ..memory.permissions import permission_block_message
+from ..security.permissions import PermissionDecision
 
 
 tasks_lock = threading.Lock()

@@ -12,7 +12,7 @@ from miclaw.core.tools.builtins import (
     get_current_time,
     calculator
 )
-from miclaw.core.config import MEMORY_DIR, TASKS_FILE
+from miclaw.core.runtime.config import MEMORY_DIR, TASKS_FILE
 
 
 class TestBuiltInTools(unittest.TestCase):
@@ -68,12 +68,12 @@ class TestBuiltInTools(unittest.TestCase):
 
         import tempfile
         import os
-        from miclaw.core.permissions import (
+        from miclaw.core.security.permissions import (
             PermissionConfirmationChoice,
             reset_permission_confirmation_handler,
             set_permission_confirmation_handler,
         )
-        from miclaw.core.memory_lifecycle import (
+        from miclaw.core.memory.lifecycle import (
             MemoryWriteIntent,
             reset_memory_write_intent,
             set_memory_write_intent,

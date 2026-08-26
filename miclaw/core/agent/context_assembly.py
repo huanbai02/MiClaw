@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .memory import MemoryKind, MemoryRecord
+from ..memory.models import MemoryKind, MemoryRecord
 
 
 DEFAULT_SUPPLEMENTAL_CONTEXT_CHAR_BUDGET = 8_000
