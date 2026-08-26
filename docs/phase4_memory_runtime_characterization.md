@@ -1,6 +1,6 @@
 # MiClaw Phase 4：Memory Runtime Characterization
 
-本文记录 PR 32 建立、由 PR 33–36 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing。本文仍不定义通用 `MemoryStore`、retrieval 或 context API。
+本文记录 PR 32 建立、由 PR 33–38 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing；PR 38 增加确定性、permission-aware retrieval boundary。本文仍不定义通用 `MemoryStore`、semantic retrieval 或 context API。
 
 ## 1. 当前 Memory 概览
 
@@ -34,10 +34,11 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 
 ## 3. Read Path
 
-显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.create_agent_app()` 内部的 `agent_node`，它通过 `UserProfileStore` 读取：
+显式 Memory 的正式 read entry point 不是一个独立 Tool/API，而是 `miclaw.core.agent.create_agent_app()` 内部的 `agent_node`，它通过 `MemoryRetriever` 读取：
 
 ```text
 effective GLOBAL/PROJECT user_profile.md
+    ↓ MemoryRetriever.retrieve(USER_PROFILE, limit=1)
     ↓ scope-aware MEMORY_READ permission
     ↓ UserProfileStore.read_primary_record()
     ↓ Path.exists + read_text(encoding="utf-8", errors="ignore").strip()
@@ -58,7 +59,7 @@ effective GLOBAL/PROJECT user_profile.md
 - Profile 读取使用 `errors="ignore"`：invalid UTF-8 byte 被丢弃，读取继续，不会因 decoding error 终止 Agent node。
 - 读取使用整文件 `read()`，目前没有字符、token、文件数或 retrieval budget；较大 profile 会整体拼入 prompt。
 
-`save_user_profile` 的 docstring 提到先调用 `read_user_profile`，但当前 `BUILTIN_TOOLS` 中没有这个 Tool，代码库也没有同名正式 read API。模型实际只能通过后续 Agent prompt 自动看到 profile，或在上下文中保留先前已知内容。
+当前没有专用的 `read_user_profile` Tool。模型通过后续 Agent prompt 自动获得当前 effective profile，或在上下文中保留先前已知内容。
 
 ## 4. Write Path
 
@@ -170,17 +171,19 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 
 既有 `tests/test_builtins.py` 覆盖 profile save 的基础成功路径；`tests/test_sandbox_tools.py` 覆盖 generic office file Tool 对 `../memory/user_profile.md` 的 containment rejection；`tests/test_agent.py` 与 context tests 覆盖 Agent graph/state 的基础行为。
 
+`tests/test_memory_retrieval.py` 额外锁定空请求零访问、请求边界、单一 effective record、无缓存 freshness、授权读取委托、DENY 零内容读取，以及 PROJECT/GLOBAL 选择和 Agent prompt 回归。
+
 ## 11. Known Limitations
 
 ### Current behavior
 
 - 仅有 GLOBAL profile 和一个按 canonical project path digest 路由的 PROJECT profile；没有 user/task namespace 或多 record retrieval。
 - 项目移动会改变 PROJECT namespace；当前没有 manifest identity、迁移或 registry。
-- 只读取一个固定文件，没有 multi-file discovery、排序、retrieval 或 relevance selection。
+- 只读取一个固定文件；没有 multi-file discovery、semantic search、relevance selection 或 multi-record ranking。
 - profile 全量 direct concatenation 进 SystemMessage，没有 hard budget、provenance 或 instruction/data boundary。
-- 缺少正式 profile read Tool；现有 write Tool docstring 引用了不存在的 `read_user_profile`。
+- 缺少正式 profile read Tool；当前 profile 仅通过 Agent prompt 自动注入。
 - 写入使用同目录唯一 temporary file，完整写入并关闭后以 `os.replace()` 原子替换正式文件。每次单独写入是原子的；没有 lock、revision、merge 或冲突检测，多个成功 writer 仍是最后完成 replace 的内容生效。这不是数据库事务，也不承诺断电场景的完整 crash consistency。
-- 仅有 scoped user-profile Memory permission；没有 persistent grants、read Tool、retrieval 或通用 Memory authorization framework。
+- 仅有 scoped user-profile Memory permission 与固定 USER_PROFILE retrieval；没有 persistent grants、read Tool、semantic retrieval 或通用 Memory authorization framework。
 - `errors="ignore"` 容忍损坏 UTF-8，但也会静默丢弃 byte。
 - `state.sqlite3` checkpoint、conversation summary 与 profile 文件的职责边界未由独立 Memory API 表达。
 - 当前 redaction 是 observability safety baseline，不是对 profile-derived information 的完整 DLP。
@@ -216,3 +219,9 @@ content   = 原 Markdown 全文
 `read_profile()` 仍保留，并委托 `read_record()` 以保持原字符串 API。PR 36 使用已授权 canonical PROJECT root 的 SHA-256 digest（前 24 个 hex 字符）作为 opaque `scope_id`，并将 PROJECT profile 放在 `<MEMORY_DIR>/projects/<scope_id>/user_profile.md`；它不把原路径放入 prompt、record、filename 或 diagnostics。
 
 PR 32 建立了以上基线；PR 33 抽取了 `UserProfileStore` filesystem boundary；PR 34 将内部读取表示由 `str` 提升为 `MemoryRecord`；PR 35 将写入替换为 atomic replace；PR 36 有意识地改变 profile persistence routing：OFFICE 保持 GLOBAL，PROJECT 使用 scoped profile 并在缺失时回退 GLOBAL。
+
+## 14. PR 38 检索边界（不改变 context 内容）
+
+`MemoryRetriever` 只接受 host/runtime 构造的 `MemoryRetrievalRequest`，当前唯一支持 `USER_PROFILE`。请求要求 tuple kind 集合、无重复 kind，且 `limit` 为 1–32 的精确整数；空 kind 集合直接返回空 tuple，不触发 permission 或 filesystem access。实际 `USER_PROFILE` retrieval 始终复用 `read_authorized_user_profile()`，因此 PROJECT primary 与独立授权的 GLOBAL fallback 仍只返回一个 effective record，或在阻断时返回空 tuple。
+
+Retriever 返回不可变 tuple，不扫描目录、不做 query、语义搜索、排序或缓存，也不格式化 prompt 或记录 profile 内容。Agent 仍只取该 record 的 `content`，沿用原有 SystemMessage delimiter、summary 顺序与 `暂无记录` fallback。

@@ -9,7 +9,8 @@ from .tools.builtins import BUILTIN_TOOLS
 from .logger import audit_logger
 from .redaction import summarize_content, summarize_tool_args
 from .config import MEMORY_DIR
-from .memory_permissions import read_authorized_user_profile
+from .memory import MemoryKind
+from .memory_retrieval import MemoryRetrievalRequest, MemoryRetriever
 from .skill_loader import load_dynamic_skills
 from langchain_core.runnables import RunnableConfig
 from prompt_toolkit import print_formatted_text
@@ -32,6 +33,8 @@ def create_agent_app(
 
     llm = get_provider(provider_name=provider_name, model_name=model_name)
     llm_with_tools = llm.bind_tools(actual_tools)
+    memory_retriever = MemoryRetriever(MEMORY_DIR)
+    profile_retrieval_request = MemoryRetrievalRequest((MemoryKind.USER_PROFILE,))
 
     def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         """
@@ -89,8 +92,8 @@ def create_agent_app(
             active_summary = current_summary
 
         # 读取用户画像
-        profile_record = read_authorized_user_profile(MEMORY_DIR)
-        profile_content = profile_record.content if profile_record else "暂无记录"
+        profile_records = memory_retriever.retrieve(profile_retrieval_request)
+        profile_content = profile_records[0].content if profile_records else "暂无记录"
 
         sys_prompt = (
             "你是 MiClaw，一个聪明、高效、说话自然的 AI 助手。\n\n"

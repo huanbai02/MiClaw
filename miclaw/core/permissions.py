@@ -248,13 +248,15 @@ def _evaluate_memory_permission(request: PermissionRequest) -> PermissionResult:
     if memory_kind != "user_profile":
         return deny("Unknown memory kind is denied", RiskLevel.HIGH)
     if scope == "global":
-        if request.target != "user-profile" or scope_id not in {None, ""} or workspace_scope != "global":
+        valid_global_scope_id = scope_id is None or (type(scope_id) is str and scope_id == "")
+        if request.target != "user-profile" or not valid_global_scope_id or workspace_scope != "global":
             return deny("Invalid global memory identity is denied", RiskLevel.HIGH)
     elif scope == "project":
         target_match = _MEMORY_PROJECT_TARGET_PATTERN.fullmatch(request.target)
         if (
             target_match is None
-            or not isinstance(scope_id, str)
+            or type(scope_id) is not str
+            or not scope_id.strip()
             or target_match.group(1) != scope_id
             or workspace_scope != "project"
         ):

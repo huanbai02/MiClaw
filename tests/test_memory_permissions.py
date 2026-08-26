@@ -140,6 +140,72 @@ def test_invalid_memory_requests_are_denied(permission_request):
     assert memory_permissions.evaluate_permission(permission_request).decision is PermissionDecision.DENY
 
 
+@pytest.mark.parametrize("scope_id", [[], {}, 0, False, ["x"], {"x": "y"}, 1, True, 1.5, ()])
+def test_global_memory_scope_id_malformed_types_are_denied(scope_id):
+    """GLOBAL scope_id 只接受 None 或精确空字符串，且不对不可哈希值崩溃。"""
+    request = PermissionRequest(
+        capability=PermissionCapability.MEMORY_READ,
+        operation="read",
+        target="user-profile",
+        risk_level=RiskLevel.LOW,
+        metadata={
+            "memory_kind": "user_profile",
+            "memory_scope": "global",
+            "memory_scope_id": scope_id,
+            "workspace_scope": "global",
+        },
+    )
+
+    assert memory_permissions.evaluate_permission(request).decision is PermissionDecision.DENY
+
+
+@pytest.mark.parametrize("scope_id", [[], {}, 0, False, "", None])
+def test_project_memory_scope_id_malformed_types_are_denied(scope_id):
+    """PROJECT scope_id 必须是非空字符串，malformed metadata 一律 DENY。"""
+    request = PermissionRequest(
+        capability=PermissionCapability.MEMORY_READ,
+        operation="read",
+        target=f"user-profile::{'a' * 24}",
+        risk_level=RiskLevel.LOW,
+        metadata={
+            "memory_kind": "user_profile",
+            "memory_scope": "project",
+            "memory_scope_id": scope_id,
+            "workspace_scope": "project",
+        },
+    )
+
+    assert memory_permissions.evaluate_permission(request).decision is PermissionDecision.DENY
+
+
+def test_project_memory_non_empty_opaque_scope_id_remains_allowed():
+    """合法 opaque PROJECT identity 继续遵循既有 read/write policy。"""
+    scope_id = "a" * 24
+    metadata = {
+        "memory_kind": "user_profile",
+        "memory_scope": "project",
+        "memory_scope_id": scope_id,
+        "workspace_scope": "project",
+    }
+    read_request = PermissionRequest(
+        capability=PermissionCapability.MEMORY_READ,
+        operation="read",
+        target=f"user-profile::{scope_id}",
+        risk_level=RiskLevel.LOW,
+        metadata=metadata,
+    )
+    write_request = PermissionRequest(
+        capability=PermissionCapability.MEMORY_WRITE,
+        operation="update",
+        target=f"user-profile::{scope_id}",
+        risk_level=RiskLevel.MEDIUM,
+        metadata=metadata,
+    )
+
+    assert memory_permissions.evaluate_permission(read_request).decision is PermissionDecision.ALLOW
+    assert memory_permissions.evaluate_permission(write_request).decision is PermissionDecision.ASK
+
+
 def test_project_read_authorizes_project_then_global_fallback_separately(tmp_path, monkeypatch):
     """PROJECT missing 时 GLOBAL fallback 是第二次独立 read permission。"""
     memory_dir = tmp_path / "memory"
