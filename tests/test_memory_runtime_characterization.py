@@ -127,8 +127,8 @@ def test_agent_injects_bounded_profile_and_current_summary_into_system_prompt(tm
     assert "【用户长期画像 (静态偏好)】" in prompt
     assert "[近期对话上下文]" in prompt
     assert "user-profile" not in prompt
-    assert "user_profile_store" not in prompt
-    assert "global" not in prompt
+    assert "来源通道: user_profile_store" in prompt
+    assert "范围: global" in prompt
 
 
 def test_agent_reads_profile_from_filesystem_each_invocation_and_ignores_invalid_utf8(tmp_path, monkeypatch):

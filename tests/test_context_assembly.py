@@ -11,7 +11,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from miclaw.core import agent, memory_permissions
 from miclaw.core.context_assembly import (
     DEFAULT_SUPPLEMENTAL_CONTEXT_CHAR_BUDGET,
+    HISTORICAL_CONTEXT_POLICY,
+    MEMORY_DATA_BEGIN,
+    MEMORY_DATA_END,
     SUPPLEMENTAL_OMITTED_MARKER,
+    SUMMARY_DATA_BEGIN,
+    SUMMARY_DATA_END,
     TRUNCATION_MARKER,
     ContextAssembler,
     ContextAssemblyRequest,
@@ -83,8 +88,8 @@ def disable_memory_permission_audit(monkeypatch):
     monkeypatch.setattr(memory_permissions, "_permission_confirmation_audit_logger", lambda *args, **kwargs: None)
 
 
-def _capture_agent_prompt(monkeypatch, memory_dir: Path, summary: str = "") -> str:
-    """通过真实 Agent retrieve + assembly 路径得到 system prompt。"""
+def _capture_agent_messages(monkeypatch, memory_dir: Path, summary: str = ""):
+    """通过真实 Agent retrieve + assembly 路径捕获模型输入消息。"""
     model = _CaptureModel()
     monkeypatch.setattr(agent, "MEMORY_DIR", str(memory_dir))
     monkeypatch.setattr(agent, "audit_logger", _NoopAuditLogger())
@@ -94,27 +99,31 @@ def _capture_agent_prompt(monkeypatch, memory_dir: Path, summary: str = "") -> s
         {"messages": [HumanMessage(content="assemble context")], "summary": summary},
         config={"configurable": {"thread_id": "context-assembly"}},
     )
-    return str(next(message.content for message in model.inputs[0] if isinstance(message, SystemMessage)))
+    return model.inputs[0]
 
 
-def test_normal_size_content_keeps_pr38_prompt_layout_exactly():
-    """预算充足时 section wording、内容和渲染顺序保持原 Agent 格式。"""
+def _capture_agent_prompt(monkeypatch, memory_dir: Path, summary: str = "") -> str:
+    """返回真实 Agent 组装后的单一 SystemMessage 内容。"""
+    messages = _capture_agent_messages(monkeypatch, memory_dir, summary)
+    return str(next(message.content for message in messages if isinstance(message, SystemMessage)))
+
+
+def test_normal_size_content_uses_historical_context_blocks():
+    """预算充足时正文完整保留，并由固定 trust/provenance template 包裹。"""
     result = _assemble(memory_records=(_record("PROFILE_MARKER"),), summary="SUMMARY_MARKER")
 
-    expected = (
-        "BASE_SYSTEM_RULES\n\n"
-        "=============================\n"
-        "【用户长期画像 (静态偏好)】\n"
-        "PROFILE_MARKER\n"
-        "=============================\n"
-        "\n\n[近期对话上下文]\nSUMMARY_MARKER\n\n"
-        "(注：这是系统自动生成的近期沟通摘要，请结合它来理解用户的最新问题)"
-    )
-    assert result.system_prompt == expected
+    assert result.system_prompt.startswith(f"BASE_SYSTEM_RULES\n\n{HISTORICAL_CONTEXT_POLICY}")
+    assert "类型: user_profile\n范围: global\n来源通道: user_profile_store" in result.system_prompt
+    assert f"{MEMORY_DATA_BEGIN}\nPROFILE_MARKER\n{MEMORY_DATA_END}" in result.system_prompt
+    assert f"{SUMMARY_DATA_BEGIN}\nSUMMARY_MARKER\n{SUMMARY_DATA_END}" in result.system_prompt
+    assert result.system_prompt.index(MEMORY_DATA_BEGIN) < result.system_prompt.index(SUMMARY_DATA_BEGIN)
     assert result.used_dynamic_chars == len("PROFILE_MARKER") + len("SUMMARY_MARKER")
     assert not result.summary_truncated
     assert not result.memory_truncated
     assert not result.memory_omitted_due_to_budget
+    assert result.historical_context_framed
+    assert result.memory_provenance_present
+    assert result.summary_provenance_present
 
 
 def test_default_supplemental_character_budget_is_stable():
@@ -235,23 +244,16 @@ def test_result_is_immutable_and_does_not_duplicate_dynamic_content_fields():
     assert "raw_memory_contents" not in result.__dict__
 
 
-def test_agent_uses_assembler_with_normal_size_pr38_compatible_prompt(tmp_path, monkeypatch):
-    """真实 Agent 的小内容 prompt 与 PR38 手工拼接格式等价。"""
+def test_agent_uses_assembler_with_normal_size_historical_context_prompt(tmp_path, monkeypatch):
+    """真实 Agent 保留内容和顺序，并使用 PR40 historical framing。"""
     memory_dir = tmp_path / "memory"
     UserProfileStore(memory_dir / "user_profile.md").write_profile("PROFILE_MARKER")
 
     prompt = _capture_agent_prompt(monkeypatch, memory_dir, "SUMMARY_MARKER")
-    expected = (
-        f"{agent.BASE_SYSTEM_PROMPT}\n\n"
-        "=============================\n"
-        "【用户长期画像 (静态偏好)】\n"
-        "PROFILE_MARKER\n"
-        "=============================\n"
-        "\n\n[近期对话上下文]\nSUMMARY_MARKER\n\n"
-        "(注：这是系统自动生成的近期沟通摘要，请结合它来理解用户的最新问题)"
-    )
-
-    assert prompt == expected
+    assert prompt.startswith(f"{agent.BASE_SYSTEM_PROMPT}\n\n{HISTORICAL_CONTEXT_POLICY}")
+    assert f"{MEMORY_DATA_BEGIN}\nPROFILE_MARKER\n{MEMORY_DATA_END}" in prompt
+    assert f"{SUMMARY_DATA_BEGIN}\nSUMMARY_MARKER\n{SUMMARY_DATA_END}" in prompt
+    assert prompt.index(MEMORY_DATA_BEGIN) < prompt.index(SUMMARY_DATA_BEGIN)
 
 
 def test_agent_bounds_oversized_profile_without_changing_base_rules(tmp_path, monkeypatch):
@@ -278,3 +280,15 @@ def test_agent_blocked_read_uses_no_record_fallback_without_exposing_profile(tmp
 
     assert "BLOCKED_PROFILE_SECRET" not in prompt
     assert "暂无记录" in prompt
+
+
+def test_agent_keeps_historical_context_in_existing_single_system_message(tmp_path, monkeypatch):
+    """PR40 framing 不增加 synthetic Human/Tool/AI message role。"""
+    memory_dir = tmp_path / "memory"
+    UserProfileStore(memory_dir / "user_profile.md").write_profile("PROFILE")
+
+    messages = _capture_agent_messages(monkeypatch, memory_dir, "SUMMARY")
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[1], HumanMessage)

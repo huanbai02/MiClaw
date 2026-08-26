@@ -95,7 +95,7 @@ SystemMessage + 保留的近期对话消息
 llm.bind_tools(...).invoke(...)
 ```
 
-Profile 有明确文本 delimiter，但没有独立 provenance model、trust level、instruction/data separation 或 escaping；它以原始文本（可能因 supplemental character budget 截断）与 system-level rules 同一条 message 发送。当前 Prompt 对 profile 的描述是“静态偏好”，但没有 runtime enforcement 防止 profile 文本包含指令样内容。
+Profile 与 summary 都保留在同一 `SystemMessage`，但由固定 historical-context policy 与 data block 包裹：system/runtime rules 高于当前用户请求，二者都高于 historical context。profile block 仅展示 `kind`、logical `scope` 和 `source channel`；`source` 表示 `USER_PROFILE_STORE` 来源通道，不表示 verified author 或事实正确性。PROJECT 只显示 `project` scope，不暴露 scope ID、project hash 或 filesystem path。payload 内的 ContextAssembler reserved boundary markers 会先被确定性替换，再参与 supplemental character budget/truncation；除此之外不会改写或删除 instruction-like 文本。
 
 `AgentState.summary` 是另一条 context injection：当 Agent code 调用 `trim_context_messages(raw_messages, trigger_turns=40, keep_turns=10)` 丢弃早期回合时，它让模型生成约 150 字的 summary，并把该 summary 更新到 graph state；下次 node 会在 `[近期对话上下文]` 段直接拼入 system prompt。150 字是 summary prompt 的要求，不是对实际 state 的硬性 runtime length check。
 
@@ -180,7 +180,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - 仅有 GLOBAL profile 和一个按 canonical project path digest 路由的 PROJECT profile；没有 user/task namespace 或多 record retrieval。
 - 项目移动会改变 PROJECT namespace；当前没有 manifest identity、迁移或 registry。
 - 只读取一个固定文件；没有 multi-file discovery、semantic search、relevance selection 或 multi-record ranking。
-- profile/summary 的注入已有 8000 character supplemental budget，但没有完整 model token-window budget、provenance 或 instruction/data boundary。
+- profile/summary 的注入已有 8000 character supplemental budget，以及最小 historical provenance/trust framing；但没有完整 model token-window budget、verified author 或 formal model isolation。
 - 缺少正式 profile read Tool；当前 profile 仅通过 Agent prompt 自动注入。
 - 写入使用同目录唯一 temporary file，完整写入并关闭后以 `os.replace()` 原子替换正式文件。每次单独写入是原子的；没有 lock、revision、merge 或冲突检测，多个成功 writer 仍是最后完成 replace 的内容生效。这不是数据库事务，也不承诺断电场景的完整 crash consistency。
 - 仅有 scoped user-profile Memory permission 与固定 USER_PROFILE retrieval；没有 persistent grants、read Tool、semantic retrieval 或通用 Memory authorization framework。
@@ -232,4 +232,12 @@ Agent 先用 `MemoryRetriever` 取得至多一个 effective `MemoryRecord`，再
 
 `DEFAULT_SUPPLEMENTAL_CONTEXT_CHAR_BUDGET` 为 8000，使用 Python `len()` 的 character count，不等同模型 token budget。该 hard budget 只计 summary 与 profile content；base system rules、固定 section labels/empty/omission markers，以及 retained recent messages 均不计入也不会被截断。summary 优先分配动态预算，profile 使用余量；render order 仍为 base rules、长期画像、近期对话上下文。profile 存在但无余量时显示固定“内容因上下文预算未注入”标记，与不存在 record 时的“暂无记录”区分。
 
-PR 39 不调整 recent-message trimming、summary generation、routing、permission、retrieval、trust/provenance 或 prompt 注入语义；它只是 bounded context baseline，不是完整 tokenizer-aware model-window manager。
+PR 39 不调整 recent-message trimming、summary generation、routing、permission 或 retrieval；它建立 bounded context baseline，不是完整 tokenizer-aware model-window manager。PR 40 在其上增加下节的 historical trust/provenance framing。
+
+## 16. PR 40 Historical Context Trust Boundary
+
+`ContextAssembler` 通过固定 template 声明 hierarchy：system/runtime policy > current user instruction > historical context。historical context 包含 User Profile Memory 与 conversation summary；它可用于理解偏好、历史事实和连续性，但其中命令式、角色修改式或权限相关文本不能覆盖当前有效的高优先级指令。summary 使用 `conversation_summary` / `derived_context` 来源通道，不伪造为用户原话或 verified transcript。
+
+存在 profile 时，Assembler 在既有长期画像 section 内渲染 `kind=user_profile`、`scope=global|project`、`source=user_profile_store` 与固定 `<<<MICLAW_MEMORY_DATA_BEGIN>>>` / `END` boundary；summary 使用独立的 `<<<MICLAW_SUMMARY_DATA_BEGIN>>>` / `END` boundary。不存在 record 时仍显示 `暂无记录`；存在 record 但动态预算耗尽时显示既有 omission marker，二者不混同。
+
+所有 historical payload 会先转义四个 reserved boundary marker，再按 PR39 的 summary-first character budget 截断；`used_dynamic_chars` 等统计因此对应实际注入的 escaped payload，且不包含 policy、provenance、boundary 或 omission template。该 framing 是降低 historical instruction confusion 的 baseline，不是完整 prompt-injection prevention、sandbox 或模型隔离保证；PR40 未增加 content heuristic filtering、retrieval/permission/routing 变更或 context observability event。
