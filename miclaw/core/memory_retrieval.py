@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .memory import MemoryKind, MemoryRecord
-from .memory_permissions import read_authorized_user_profile
+from .memory_permissions import (
+    read_authorized_user_profile,
+    read_authorized_user_profile_with_outcome,
+)
 
 
 DEFAULT_MEMORY_RETRIEVAL_LIMIT = 1
@@ -34,6 +37,16 @@ class MemoryRetrievalRequest:
             raise ValueError("invalid memory retrieval limit")
 
 
+@dataclass(frozen=True)
+class MemoryRetrievalOutcome:
+    """保存 retrieval records 与不含 identity/content 的安全结果 metadata。"""
+
+    records: tuple[MemoryRecord, ...]
+    blocked: bool
+    block_reason_code: str | None
+    used_global_fallback: bool
+
+
 class MemoryRetriever:
     """通过既有授权读取边界返回当前 effective user-profile record。"""
 
@@ -57,3 +70,19 @@ class MemoryRetriever:
 
         record = read_authorized_user_profile(self._memory_dir)
         return (record,) if record is not None else ()
+
+    def retrieve_with_outcome(self, request: MemoryRetrievalRequest) -> MemoryRetrievalOutcome:
+        """返回 records 及供 orchestration 层记录的安全 retrieval outcome。"""
+        if not isinstance(request, MemoryRetrievalRequest):
+            raise ValueError("invalid memory retrieval request")
+        if not request.kinds:
+            return MemoryRetrievalOutcome((), False, None, False)
+
+        outcome = read_authorized_user_profile_with_outcome(self._memory_dir)
+        records = (outcome.record,) if outcome.record is not None else ()
+        return MemoryRetrievalOutcome(
+            records=records,
+            blocked=outcome.blocked,
+            block_reason_code=outcome.block_reason_code,
+            used_global_fallback=outcome.used_global_fallback,
+        )

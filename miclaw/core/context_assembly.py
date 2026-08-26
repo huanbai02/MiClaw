@@ -65,6 +65,7 @@ class ContextAssemblyResult:
     summary_chars_used: int
     memory_chars_used: int
     summary_truncated: bool
+    summary_omitted_due_to_budget: bool
     memory_truncated: bool
     memory_omitted_due_to_budget: bool
     memory_record_count: int
@@ -116,6 +117,7 @@ class ContextAssembler:
         summary_content = ""
         summary_chars_used = 0
         summary_truncated = False
+        summary_omitted_due_to_budget = False
         escaped_marker_count = 0
         if has_summary:
             escaped_summary, summary_marker_count = escape_historical_context_markers(summary)
@@ -123,6 +125,7 @@ class ContextAssembler:
             summary_content = truncate_context_content(escaped_summary, remaining)
             summary_chars_used = len(summary_content)
             summary_truncated = len(escaped_summary) > remaining
+            summary_omitted_due_to_budget = summary_chars_used == 0
             remaining -= summary_chars_used
 
         memory_content = "暂无记录"
@@ -176,6 +179,7 @@ class ContextAssembler:
             summary_chars_used=summary_chars_used,
             memory_chars_used=memory_chars_used,
             summary_truncated=summary_truncated,
+            summary_omitted_due_to_budget=summary_omitted_due_to_budget,
             memory_truncated=memory_truncated,
             memory_omitted_due_to_budget=memory_omitted_due_to_budget,
             memory_record_count=len(request.memory_records),

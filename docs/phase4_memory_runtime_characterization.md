@@ -1,6 +1,6 @@
 # MiClaw Phase 4：Memory Runtime Characterization
 
-本文记录 PR 32 建立、由 PR 33–39 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing；PR 38 增加确定性、permission-aware retrieval boundary；PR 39 增加有界的 context assembly。本文仍不定义通用 `MemoryStore`、semantic retrieval 或完整 context API。
+本文记录 PR 32 建立、由 PR 33–41 演进后的 Memory runtime 行为。PR 33 将固定 profile 的 filesystem IO 收敛到 `UserProfileStore`；PR 34 补充最小结构化语义；PR 36 为 profile 启用明确的 GLOBAL / PROJECT persistence routing；PR 38 增加确定性、permission-aware retrieval boundary；PR 39–40 增加有界、带 historical trust framing 的 context assembly；PR 41 为该链路增加 metadata-only observability。本文仍不定义通用 `MemoryStore`、semantic retrieval 或完整 context API。
 
 ## 1. 当前 Memory 概览
 
@@ -151,9 +151,9 @@ Generic office file/shell Tools 与 profile path 的关系如上节所述；它�
 
 ## 9. Observability 与安全边界
 
-Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会直接写出已拼装的 system prompt 或完整 profile。Phase 3A 还会对 `tool_call` args、`tool_result` content 和 `ai_message` content 做有界 redaction/summary，monitor、`logs --tail`、`trace` 会在显示层再次清洗。
+Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会直接写出已拼装的 system prompt 或完整 profile。PR 41 还在同一 JSONL/monitor/logs/trace pipeline 中记录 `memory_retrieval`（requested kind/limit、result count、GLOBAL/PROJECT category、GLOBAL fallback、blocked 状态）与 `context_assembly`（supplemental budget、实际字符数、truncation/omission、historical framing、boundary escape count）事件。它们只使用固定枚举、counts 和 flags：不包含 profile/summary/system prompt/user query、memory/scope identity、project/path 或任何正文；monitor 与 CLI formatter 对损坏字段仅显示安全占位，不回显 raw value。
 
-但 profile 会影响模型生成内容。若模型把 profile 内容转写到普通、未命中 sensitive/content 规则的 Tool argument 中，当前 conservative redaction 不是完整 DLP，不能保证业务敏感信息绝不出现在 observability path。Memory access 现在有 permission decision/confirmation audit，但 profile 本身仍没有 provenance 或 prompt-injection boundary，且 audit 不记录正文。
+但 profile 会影响模型生成内容。若模型把 profile 内容转写到普通、未命中 sensitive/content 规则的 Tool argument 中，当前 conservative redaction 不是完整 DLP，不能保证业务敏感信息绝不出现在 observability path。Memory access 现在有 permission decision/confirmation audit 和 historical provenance/trust framing，但 audit、retrieval 与 assembly events 均不记录正文；trace 解释的是 selection/budget 路径，不是完整 prompt replay。
 
 固定配置路径与 scope-aware identity 避免了由模型提供任意 Memory path 的问题；Memory permission 不等同于 filesystem sandbox，当前 writer 仍缺少 concurrency control 和 revision history。PR 35 的 atomic replace 只保护单次替换，不是完整持久化事务。
 
@@ -241,3 +241,11 @@ PR 39 不调整 recent-message trimming、summary generation、routing、permiss
 存在 profile 时，Assembler 在既有长期画像 section 内渲染 `kind=user_profile`、`scope=global|project`、`source=user_profile_store` 与固定 `<<<MICLAW_MEMORY_DATA_BEGIN>>>` / `END` boundary；summary 使用独立的 `<<<MICLAW_SUMMARY_DATA_BEGIN>>>` / `END` boundary。不存在 record 时仍显示 `暂无记录`；存在 record 但动态预算耗尽时显示既有 omission marker，二者不混同。
 
 所有 historical payload 会先转义四个 reserved boundary marker，再按 PR39 的 summary-first character budget 截断；`used_dynamic_chars` 等统计因此对应实际注入的 escaped payload，且不包含 policy、provenance、boundary 或 omission template。该 framing 是降低 historical instruction confusion 的 baseline，不是完整 prompt-injection prevention、sandbox 或模型隔离保证；PR40 未增加 content heuristic filtering、retrieval/permission/routing 变更或 context observability event。
+
+## 17. PR 41 Memory / Context Observability
+
+Agent orchestration 在 permission-aware retrieval 完成后发出至多一条 `memory_retrieval`，在纯 `ContextAssembler` 返回后发出至多一条 `context_assembly`；底层 `MemoryRetriever`、`ContextAssembler` 本身仍不依赖 logger。事件与同一 Agent node 的 permission audit、`llm_input` 共用 run/step trace context，顺序为 permission（如有）→ retrieval → assembly → llm input。
+
+`memory_retrieval` 只描述最终 outcome：requested kinds/limit、result count、selected kind/scope category、是否使用 GLOBAL fallback、是否 blocked 及安全 reason code。没有 record 时与被 permission 阻断会分别表示；PROJECT→GLOBAL fallback 只显示最终 `global` category，不记录 project ID、memory ID 或路径。`context_assembly` 直接消费 `ContextAssemblyResult` 的 budget/used-char counts、truncation/omission flags、record count、historical framing 与 escape count，不重算也不保存 payload。
+
+因此 monitor、`miclaw logs --tail` 与 `miclaw trace` 能解释“选中了什么 logical scope、为何 fallback/blocked、预算如何分配”，但不能重建 Memory body、summary、system prompt 或用户 query。PR 41 不改变 retrieval、permission、routing、budget、trust framing、write 或模型可见 prompt 行为。

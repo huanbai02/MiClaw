@@ -44,6 +44,16 @@ class MemoryAuthorization:
     final_result: PermissionResult
 
 
+@dataclass(frozen=True)
+class AuthorizedUserProfileReadOutcome:
+    """保存授权读取的最终结果及不含正文的安全 outcome metadata。"""
+
+    record: MemoryRecord | None
+    blocked: bool
+    block_reason_code: str | None
+    used_global_fallback: bool
+
+
 _permission_evaluator = evaluate_permission
 _permission_audit_logger = log_permission_decision
 _permission_confirmation_audit_logger = log_permission_confirmation
@@ -127,23 +137,51 @@ def authorize_memory_access(
 
 def read_authorized_user_profile(memory_dir: Path | str) -> MemoryRecord | None:
     """读取当前 effective profile；PROJECT fallback 是独立的 GLOBAL read authorization。"""
+    return read_authorized_user_profile_with_outcome(memory_dir).record
+
+
+def read_authorized_user_profile_with_outcome(
+    memory_dir: Path | str,
+) -> AuthorizedUserProfileReadOutcome:
+    """读取 current effective profile，并返回供 runtime observability 使用的安全结果。"""
     target = resolve_user_profile_target(memory_dir)
     authorization = authorize_memory_access(target, "read", "user_profile_context")
     if authorization.final_result.decision is not PermissionDecision.ALLOW:
-        return None
+        return AuthorizedUserProfileReadOutcome(
+            record=None,
+            blocked=True,
+            block_reason_code=_read_block_reason_code(authorization.final_result),
+            used_global_fallback=False,
+        )
 
     record = target.store.read_primary_record()
     if record is not None or target.store.scope.kind is MemoryScopeKind.GLOBAL:
-        return record
+        return AuthorizedUserProfileReadOutcome(
+            record=record,
+            blocked=False,
+            block_reason_code=None,
+            used_global_fallback=False,
+        )
 
     global_path = target.store.global_profile_path
     if global_path is None:
-        return None
+        return AuthorizedUserProfileReadOutcome(None, False, None, False)
     fallback_target = ResolvedUserProfileTarget(UserProfileStore(global_path), is_global_fallback=True)
     fallback_authorization = authorize_memory_access(fallback_target, "read", "user_profile_context")
     if fallback_authorization.final_result.decision is not PermissionDecision.ALLOW:
-        return None
-    return fallback_target.store.read_primary_record()
+        return AuthorizedUserProfileReadOutcome(
+            record=None,
+            blocked=True,
+            block_reason_code=_read_block_reason_code(fallback_authorization.final_result),
+            used_global_fallback=False,
+        )
+    fallback_record = fallback_target.store.read_primary_record()
+    return AuthorizedUserProfileReadOutcome(
+        record=fallback_record,
+        blocked=False,
+        block_reason_code=None,
+        used_global_fallback=fallback_record is not None,
+    )
 
 
 def authorize_user_profile_write(memory_dir: Path | str) -> MemoryAuthorization:
@@ -164,6 +202,13 @@ def _operation_permission(operation: str) -> tuple[PermissionCapability, RiskLev
     if operation == "read":
         return PermissionCapability.MEMORY_READ, RiskLevel.LOW
     return PermissionCapability.MEMORY_WRITE, RiskLevel.MEDIUM
+
+
+def _read_block_reason_code(result: PermissionResult) -> str:
+    """将已解析的 read block 映射为不暴露 request/detail 的稳定代码。"""
+    if result.decision is PermissionDecision.ASK:
+        return "permission_required"
+    return "permission_denied"
 
 
 def _target_matches_active_workspace(target: ResolvedUserProfileTarget) -> bool:
