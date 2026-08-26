@@ -11,7 +11,9 @@ from .sandbox_tools import (
     write_office_file,
     execute_office_shell
 )
-from ..user_profile import get_user_profile_store
+from .result import format_tool_result_for_model, tool_permission_blocked
+from ..memory_permissions import authorize_user_profile_write, permission_block_message
+from ..permissions import PermissionDecision
 
 
 tasks_lock = threading.Lock()
@@ -43,7 +45,16 @@ def save_user_profile(new_content: str) -> str:
     2.将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
     注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
     """
-    get_user_profile_store(MEMORY_DIR).write_profile(new_content)
+    authorization = authorize_user_profile_write(MEMORY_DIR)
+    if authorization.final_result.decision is not PermissionDecision.ALLOW:
+        return format_tool_result_for_model(
+            tool_permission_blocked(
+                permission_block_message(authorization.final_result),
+                decision=authorization.final_result.decision.value,
+                metadata={"permission_decision": authorization.final_result.decision.value},
+            )
+        )
+    authorization.target.store.write_profile(new_content)
 
     return "记忆档案已成功覆写更新。新的人设画像已生效。"
 

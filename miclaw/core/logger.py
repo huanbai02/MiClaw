@@ -132,6 +132,8 @@ _SAFE_METADATA_KEYS = {
     "shell_risk_level",
     "blocked_by_shell_safety",
     "workspace_scope",
+    "memory_scope",
+    "memory_scope_id",
 }
 
 

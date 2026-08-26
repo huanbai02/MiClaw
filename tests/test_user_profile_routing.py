@@ -6,6 +6,11 @@ import pytest
 
 from miclaw.core import user_profile
 from miclaw.core.memory import MemoryScopeKind
+from miclaw.core.permissions import (
+    PermissionConfirmationChoice,
+    reset_permission_confirmation_handler,
+    set_permission_confirmation_handler,
+)
 from miclaw.core.tools import builtins
 from miclaw.core.user_profile import (
     UserProfilePersistenceError,
@@ -169,10 +174,14 @@ def test_builtin_uses_active_project_scope_without_scope_or_path_arguments(tmp_p
     monkeypatch.setattr(builtins, "MEMORY_DIR", str(memory_dir))
     _global_store(memory_dir).write_profile("GLOBAL_MARKER")
     token = set_active_project_root(project_path)
+    confirmation_token = set_permission_confirmation_handler(
+        lambda request, result: PermissionConfirmationChoice.ALLOW_ONCE
+    )
     try:
         result = builtins.save_user_profile.invoke({"new_content": "PROJECT_A_MARKER"})
         project_record = get_user_profile_store(memory_dir).read_record()
     finally:
+        reset_permission_confirmation_handler(confirmation_token)
         reset_active_project_root(token)
 
     assert "成功覆写更新" in result

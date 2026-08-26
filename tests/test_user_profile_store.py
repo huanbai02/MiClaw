@@ -1,6 +1,7 @@
 """验证 UserProfileStore 保持 PR 32 已冻结的 profile filesystem 语义。"""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from miclaw.core.user_profile import (
     get_user_profile_store,
 )
 from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.permissions import allow
 
 
 def test_store_owns_fixed_profile_path_under_memory_directory(tmp_path):
@@ -209,8 +211,11 @@ def test_builtin_does_not_report_success_when_store_persistence_fails(monkeypatc
 
     monkeypatch.setattr(
         builtins,
-        "get_user_profile_store",
-        lambda _memory_dir: _FailingStore(),
+        "authorize_user_profile_write",
+        lambda _memory_dir: SimpleNamespace(
+            final_result=allow("allowed"),
+            target=SimpleNamespace(store=_FailingStore()),
+        ),
     )
 
     with pytest.raises(UserProfilePersistenceError, match="^user_profile_write_failed$"):
@@ -225,7 +230,14 @@ def test_save_user_profile_delegates_write_to_profile_store(monkeypatch):
         def write_profile(self, content: str) -> None:
             written.append(content)
 
-    monkeypatch.setattr(builtins, "get_user_profile_store", lambda _memory_dir: _RecordingStore())
+    monkeypatch.setattr(
+        builtins,
+        "authorize_user_profile_write",
+        lambda _memory_dir: SimpleNamespace(
+            final_result=allow("allowed"),
+            target=SimpleNamespace(store=_RecordingStore()),
+        ),
+    )
 
     result = builtins.save_user_profile.invoke({"new_content": "PROFILE_FROM_TOOL"})
 

@@ -18,6 +18,7 @@ from .workspace import WorkspaceScope
 _MCP_TOOL_TARGET_PATTERN = re.compile(
     r"^mcp::[A-Za-z0-9][A-Za-z0-9._-]{0,79}::[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
 )
+_MEMORY_PROJECT_TARGET_PATTERN = re.compile(r"^user-profile::([0-9a-f]{24})$")
 
 
 class PermissionCapability(str, Enum):
@@ -192,6 +193,9 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
     capability = safe_request.capability
     risk_level = safe_request.risk_level
 
+    if capability in {PermissionCapability.MEMORY_READ, PermissionCapability.MEMORY_WRITE}:
+        return _evaluate_memory_permission(safe_request)
+
     if "workspace_scope" in safe_request.metadata:
         workspace_scope = _workspace_scope_from_request(safe_request)
         if workspace_scope is None:
@@ -231,15 +235,43 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
             return deny("Invalid MCP tool identity is denied", RiskLevel.HIGH)
         return ask("MCP tool invocation requires confirmation", RiskLevel.HIGH)
 
-    if capability is PermissionCapability.MEMORY_READ:
-        if risk_level is RiskLevel.LOW:
-            return allow("Low-risk memory read is allowed by default policy", risk_level)
-        return ask("Memory read above low risk requires confirmation", risk_level)
-
-    if capability is PermissionCapability.MEMORY_WRITE:
-        return ask("Memory write requires confirmation by default", risk_level)
-
     return deny("Unknown capability is denied by default", RiskLevel.HIGH)
+
+
+def _evaluate_memory_permission(request: PermissionRequest) -> PermissionResult:
+    """评估唯一已支持的 scoped user-profile Memory identity。"""
+    scope = str(request.metadata.get("memory_scope") or "")
+    scope_id = request.metadata.get("memory_scope_id")
+    workspace_scope = str(request.metadata.get("workspace_scope") or "")
+    memory_kind = str(request.metadata.get("memory_kind") or "")
+
+    if memory_kind != "user_profile":
+        return deny("Unknown memory kind is denied", RiskLevel.HIGH)
+    if scope == "global":
+        if request.target != "user-profile" or scope_id not in {None, ""} or workspace_scope != "global":
+            return deny("Invalid global memory identity is denied", RiskLevel.HIGH)
+    elif scope == "project":
+        target_match = _MEMORY_PROJECT_TARGET_PATTERN.fullmatch(request.target)
+        if (
+            target_match is None
+            or not isinstance(scope_id, str)
+            or target_match.group(1) != scope_id
+            or workspace_scope != "project"
+        ):
+            return deny("Invalid project memory identity is denied", RiskLevel.HIGH)
+    else:
+        return deny("Unknown memory scope is denied", RiskLevel.HIGH)
+
+    if request.capability is PermissionCapability.MEMORY_READ:
+        if request.operation != "read":
+            return deny("Unknown memory read operation is denied", RiskLevel.HIGH)
+        if request.risk_level is RiskLevel.LOW:
+            return allow("Low-risk memory read is allowed by default policy", request.risk_level)
+        return ask("Memory read above low risk requires confirmation", request.risk_level)
+
+    if request.operation != "update":
+        return deny("Unknown memory write operation is denied", RiskLevel.HIGH)
+    return ask("Memory write requires confirmation by default", request.risk_level)
 
 
 def _evaluate_workspace_permission(request: PermissionRequest) -> PermissionResult | None:

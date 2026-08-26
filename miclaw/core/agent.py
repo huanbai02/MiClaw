@@ -9,8 +9,8 @@ from .tools.builtins import BUILTIN_TOOLS
 from .logger import audit_logger
 from .redaction import summarize_content, summarize_tool_args
 from .config import MEMORY_DIR
+from .memory_permissions import read_authorized_user_profile
 from .skill_loader import load_dynamic_skills
-from .user_profile import get_user_profile_store
 from langchain_core.runnables import RunnableConfig
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import ANSI
@@ -89,7 +89,7 @@ def create_agent_app(
             active_summary = current_summary
 
         # 读取用户画像
-        profile_record = get_user_profile_store(MEMORY_DIR).read_record()
+        profile_record = read_authorized_user_profile(MEMORY_DIR)
         profile_content = profile_record.content if profile_record else "暂无记录"
 
         sys_prompt = (

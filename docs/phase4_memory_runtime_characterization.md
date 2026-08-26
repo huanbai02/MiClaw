@@ -38,7 +38,8 @@ Config import 会通过 `os.makedirs(..., exist_ok=True)` 创建 `WORKSPACE_DIR`
 
 ```text
 effective GLOBAL/PROJECT user_profile.md
-    ↓ UserProfileStore.read_record()
+    ↓ scope-aware MEMORY_READ permission
+    ↓ UserProfileStore.read_primary_record()
     ↓ Path.exists + read_text(encoding="utf-8", errors="ignore").strip()
     ↓ profile_content（空/缺失时为“暂无记录”）
     ↓ system prompt 的“用户长期画像（静态偏好）”段
@@ -46,6 +47,8 @@ effective GLOBAL/PROJECT user_profile.md
 ```
 
 读取发生在每次 `agent_node` 执行时，不在 app construction、CLI startup 或 Tool registration 时预加载。当前没有 profile cache、TTL、memoization、排序、目录扫描或 relevance retrieval；文件变化会在下一次 Agent node 读取时可见。
+
+有效 GLOBAL 或 current authorized PROJECT profile 的 `MEMORY_READ` 使用 LOW risk，默认 ALLOW；它仍生成现有 `permission_decision` audit。PROJECT primary 缺失/空时，GLOBAL fallback 是第二次独立 `MEMORY_READ` authorization：PROJECT read 被拒绝时不会尝试 GLOBAL；PROJECT read 允许但 GLOBAL fallback 被拒绝时，Agent 使用既有 `暂无记录` fallback，不读取正文。
 
 ### Missing、multiple file 与 encoding 行为
 
@@ -70,9 +73,11 @@ save_user_profile(new_content)
     ↓ <WORKSPACE_DIR>/memory/user_profile.md
 ```
 
-该 Tool 以完整文本覆盖旧 profile，不 append、不 merge、不维护历史版本、不自动添加 newline。单次写入在同目录 temporary file 完整准备后才通过 `os.replace()` 替换目标；失败会尽力清理 temporary file，并以稳定的 `user_profile_write_failed` 错误传播到 Tool runtime。它仍没有 lock、conflict resolution 或 history。
+`save_user_profile` 先对同一次 resolved GLOBAL/PROJECT target 构造 `MEMORY_WRITE` request。有效 profile update 使用 MEDIUM risk，默认 ASK；只有 confirmation/session grant 解析为 final ALLOW 后才会创建目录、temporary file 或执行 replace。无 handler、DENY、无效确认均不产生 persistence side effect，并通过既有 permission ToolResult 文本返回阻断。
 
-`PermissionCapability.MEMORY_READ` / `MEMORY_WRITE` 已存在于 policy enum，但 `save_user_profile` 当前没有构造 `PermissionRequest`，因此不经过 Phase 2 的 confirmation/session grant/audit 链路。这是当前实现事实，不表示后续设计应继续如此。
+ALLOW 后该 Tool 以完整文本覆盖目标 profile，不 append、不 merge、不维护历史版本、不自动添加 newline。单次写入在同目录 temporary file 完整准备后才通过 `os.replace()` 替换目标；失败会尽力清理 temporary file，并以稳定的 `user_profile_write_failed` 错误传播到 Tool runtime。它仍没有 lock、conflict resolution 或 history。
+
+GLOBAL、Project A、Project B 的 write grant target 使用不同 logical `memory_id`；因此 `ALLOW_SESSION` 只能复用同一 capability、operation、tool、scope 和 profile identity，不能跨 GLOBAL/PROJECT 或跨项目授权。profile content、新 content、absolute path 与 temporary path 不进入 permission request、prompt 或 audit。
 
 ## 5. Agent Context Injection
 
@@ -127,7 +132,7 @@ PROJECT profile 存在且非空时优先读取；缺失、空或 `errors="ignore
 
 文件 Tool 的 relative-path containment 阻止其读取 `memory/`。Shell Tool 的 `cwd` 是 active OFFICE/PROJECT root，并另外用危险 pattern 拦截 `..`、absolute path、home path 和 Windows drive path，因此当前 shell input 不能以 `../memory/...` 方式访问 profile。
 
-这不改变 `save_user_profile` 的性质：它通过固定配置路径构造的 `UserProfileStore` 写入，不通过 generic file Tool 的 containment，也不通过当前 permission pipeline。
+这不改变 `save_user_profile` 的性质：它通过 resolved scoped `UserProfileStore` 写入，不通过 generic file Tool 的 containment；但现在会先经过专用的 scope-aware Memory permission boundary。
 
 ## 8. Scheduler、Skill 与 Tool 关系
 
@@ -147,9 +152,9 @@ Generic office file/shell Tools 与 profile path 的关系如上节所述；它�
 
 Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会直接写出已拼装的 system prompt 或完整 profile。Phase 3A 还会对 `tool_call` args、`tool_result` content 和 `ai_message` content 做有界 redaction/summary，monitor、`logs --tail`、`trace` 会在显示层再次清洗。
 
-但 profile 会影响模型生成内容。若模型把 profile 内容转写到普通、未命中 sensitive/content 规则的 Tool argument 中，当前 conservative redaction 不是完整 DLP，不能保证业务敏感信息绝不出现在 observability path。Profile 本身也没有专门的 permission、audit、provenance 或 prompt-injection boundary。
+但 profile 会影响模型生成内容。若模型把 profile 内容转写到普通、未命中 sensitive/content 规则的 Tool argument 中，当前 conservative redaction 不是完整 DLP，不能保证业务敏感信息绝不出现在 observability path。Memory access 现在有 permission decision/confirmation audit，但 profile 本身仍没有 provenance 或 prompt-injection boundary，且 audit 不记录正文。
 
-固定配置路径避免了由模型提供任意 Memory path 的问题，但当前 Memory writer 仍缺少 permission gate、concurrency control 和 revision history；PR 35 的 atomic replace 只保护单次替换，不是完整持久化事务。
+固定配置路径与 scope-aware identity 避免了由模型提供任意 Memory path 的问题；Memory permission 不等同于 filesystem sandbox，当前 writer 仍缺少 concurrency control 和 revision history。PR 35 的 atomic replace 只保护单次替换，不是完整持久化事务。
 
 ## 10. 当前行为测试覆盖
 
@@ -161,6 +166,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - profile 全量进入 system prompt，`AgentState.summary` 也进入同一 system prompt。
 - 同一个 Agent app 的每次 node 从 filesystem 重读 profile，文件更新可见；invalid UTF-8 byte 被忽略。
 - PROJECT profile 优先于 GLOBAL fallback；PROJECT write 不会修改 GLOBAL profile。
+- GLOBAL/current PROJECT read 经过 LOW-risk `MEMORY_READ`；write 经过 MEDIUM-risk `MEMORY_WRITE` ASK，只有 final ALLOW 才持久化。
 
 既有 `tests/test_builtins.py` 覆盖 profile save 的基础成功路径；`tests/test_sandbox_tools.py` 覆盖 generic office file Tool 对 `../memory/user_profile.md` 的 containment rejection；`tests/test_agent.py` 与 context tests 覆盖 Agent graph/state 的基础行为。
 
@@ -174,6 +180,7 @@ Agent 记录的 `llm_input` JSONL event 当前只包含 `message_count`，不会
 - profile 全量 direct concatenation 进 SystemMessage，没有 hard budget、provenance 或 instruction/data boundary。
 - 缺少正式 profile read Tool；现有 write Tool docstring 引用了不存在的 `read_user_profile`。
 - 写入使用同目录唯一 temporary file，完整写入并关闭后以 `os.replace()` 原子替换正式文件。每次单独写入是原子的；没有 lock、revision、merge 或冲突检测，多个成功 writer 仍是最后完成 replace 的内容生效。这不是数据库事务，也不承诺断电场景的完整 crash consistency。
+- 仅有 scoped user-profile Memory permission；没有 persistent grants、read Tool、retrieval 或通用 Memory authorization framework。
 - `errors="ignore"` 容忍损坏 UTF-8，但也会静默丢弃 byte。
 - `state.sqlite3` checkpoint、conversation summary 与 profile 文件的职责边界未由独立 Memory API 表达。
 - 当前 redaction 是 observability safety baseline，不是对 profile-derived information 的完整 DLP。

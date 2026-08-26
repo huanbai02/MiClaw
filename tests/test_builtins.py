@@ -68,10 +68,21 @@ class TestBuiltInTools(unittest.TestCase):
 
         import tempfile
         import os
+        from miclaw.core.permissions import (
+            PermissionConfirmationChoice,
+            reset_permission_confirmation_handler,
+            set_permission_confirmation_handler,
+        )
 
         # 测试保存功能
         test_content = "# 用户档案\n- 姓名：张三\n- 职业：工程师"
-        result = save_user_profile.invoke({"new_content": test_content})
+        confirmation_token = set_permission_confirmation_handler(
+            lambda request, policy: PermissionConfirmationChoice.ALLOW_ONCE
+        )
+        try:
+            result = save_user_profile.invoke({"new_content": test_content})
+        finally:
+            reset_permission_confirmation_handler(confirmation_token)
         self.assertEqual(result, "记忆档案已成功覆写更新。新的人设画像已生效。")
 
         profile_path = os.path.join(mock_memory_dir, "user_profile.md")

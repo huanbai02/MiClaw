@@ -77,7 +77,19 @@ def test_mcp_tool_returns_deny_by_default():
 
 
 def test_memory_write_returns_ask_by_default():
-    result = evaluate_permission(request_for(PermissionCapability.MEMORY_WRITE))
+    result = evaluate_permission(
+        PermissionRequest(
+            capability=PermissionCapability.MEMORY_WRITE,
+            operation="update",
+            target="user-profile",
+            risk_level=RiskLevel.MEDIUM,
+            metadata={
+                "memory_kind": "user_profile",
+                "memory_scope": "global",
+                "workspace_scope": "global",
+            },
+        )
+    )
 
     assert result.decision is PermissionDecision.ASK
     assert result.requires_confirmation is True

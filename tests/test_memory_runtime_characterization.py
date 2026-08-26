@@ -11,6 +11,11 @@ from miclaw.core import config
 from miclaw.core.tools import builtins
 from miclaw.core.user_profile import UserProfileStore, get_user_profile_store
 from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.permissions import (
+    PermissionConfirmationChoice,
+    reset_permission_confirmation_handler,
+    set_permission_confirmation_handler,
+)
 
 
 class _CaptureModel:
@@ -82,8 +87,14 @@ def test_save_user_profile_creates_utf8_profile_and_overwrites_previous_content(
     profile_path = memory_dir / "user_profile.md"
     monkeypatch.setattr(builtins, "MEMORY_DIR", str(memory_dir))
 
-    assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第一版\n"})
-    assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第二版：偏好"})
+    confirmation_token = set_permission_confirmation_handler(
+        lambda request, result: PermissionConfirmationChoice.ALLOW_ONCE
+    )
+    try:
+        assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第一版\n"})
+        assert "成功覆写更新" in builtins.save_user_profile.invoke({"new_content": "第二版：偏好"})
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
 
     assert profile_path.read_text(encoding="utf-8") == "第二版：偏好"
 

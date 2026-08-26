@@ -81,14 +81,26 @@ class UserProfileStore:
         Returns:
             存在且非空时返回对应 scope 的用户画像 record；否则返回 None。
         """
-        content = self._read_content(self.profile_path)
-        if content:
-            return self._record(content, self.scope)
+        record = self.read_primary_record()
+        if record is not None:
+            return record
         if self.scope.kind is MemoryScopeKind.PROJECT and self.global_profile_path is not None:
             global_content = self._read_content(self.global_profile_path)
             if global_content:
                 return self._record(global_content, MemoryScope(MemoryScopeKind.GLOBAL))
         return None
+
+    @property
+    def memory_id(self) -> str:
+        """返回当前 Store 的逻辑 Memory identity，不读取 profile 内容。"""
+        if self.scope.kind is MemoryScopeKind.PROJECT:
+            return f"{USER_PROFILE_MEMORY_ID}::{self.scope.scope_id}"
+        return USER_PROFILE_MEMORY_ID
+
+    def read_primary_record(self) -> MemoryRecord | None:
+        """只读取当前 Store 的实际文件，不执行 PROJECT → GLOBAL fallback。"""
+        content = self._read_content(self.profile_path)
+        return self._record(content, self.scope) if content else None
 
     @staticmethod
     def _read_content(profile_path: Path) -> str | None:
@@ -101,9 +113,7 @@ class UserProfileStore:
     @staticmethod
     def _record(content: str, scope: MemoryScope) -> MemoryRecord:
         """根据实际读取来源构造不包含路径的 profile record。"""
-        memory_id = USER_PROFILE_MEMORY_ID
-        if scope.kind is MemoryScopeKind.PROJECT:
-            memory_id = f"{USER_PROFILE_MEMORY_ID}::{scope.scope_id}"
+        memory_id = USER_PROFILE_MEMORY_ID if scope.kind is MemoryScopeKind.GLOBAL else f"{USER_PROFILE_MEMORY_ID}::{scope.scope_id}"
         return MemoryRecord(
             memory_id=memory_id,
             kind=MemoryKind.USER_PROFILE,
