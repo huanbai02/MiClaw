@@ -12,7 +12,7 @@ from .sandbox_tools import (
     execute_office_shell
 )
 from .result import format_tool_result_for_model, tool_error, tool_permission_blocked
-from ..memory_lifecycle import write_user_profile_with_policy
+from ..memory_lifecycle import MemoryUpdateDisposition, write_user_profile_with_policy
 from ..memory_permissions import permission_block_message
 from ..permissions import PermissionDecision
 
@@ -57,6 +57,8 @@ def save_user_profile(new_content: str) -> str:
                 metadata={"memory_write_policy": execution.policy_result.reason_code},
             )
         )
+    if execution.disposition is MemoryUpdateDisposition.NOOP_EXACT_MATCH:
+        return "记忆档案已成功覆写更新。新的人设画像已生效。"
     authorization = execution.authorization
     assert authorization is not None
     if authorization.final_result.decision is not PermissionDecision.ALLOW:

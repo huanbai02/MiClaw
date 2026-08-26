@@ -102,6 +102,22 @@ class UserProfileStore:
         content = self._read_content(self.profile_path)
         return self._record(content, self.scope) if content else None
 
+    def matches_exact_content(self, content: str) -> bool:
+        """比较 concrete target 的原始 bytes 是否等于待写入 UTF-8 bytes。
+
+        Args:
+            content: 未经规范化的完整 profile 内容。
+
+        Returns:
+            仅在当前 target 存在且 bytes 完全相同时返回 True；无法比较时保守返回 False。
+        """
+        if type(content) is not str:
+            raise ValueError("memory content must be a string")
+        try:
+            return self.profile_path.read_bytes() == content.encode("utf-8")
+        except (OSError, UnicodeEncodeError):
+            return False
+
     @staticmethod
     def _read_content(profile_path: Path) -> str | None:
         """保持 legacy profile 的整文件、UTF-8 ignore 与空内容语义。"""

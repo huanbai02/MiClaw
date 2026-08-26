@@ -184,8 +184,8 @@ def test_preflight_denial_never_resolves_target_or_authorizes(tmp_path, monkeypa
     assert not (tmp_path / "memory").exists()
 
 
-def test_valid_preflight_resolves_once_before_full_policy_and_permission(tmp_path, monkeypatch):
-    """合法 explicit intent + str content 才进入一次 target resolution 与 permission。"""
+def test_valid_preflight_resolves_once_before_full_policy_and_permissions(tmp_path, monkeypatch):
+    """合法 explicit intent + str content 才进入一次 resolution、精确读与写 permission。"""
     target = memory_permissions.resolve_user_profile_target(tmp_path / "memory")
     resolver_calls = []
     permission_calls = []
@@ -208,7 +208,7 @@ def test_valid_preflight_resolves_once_before_full_policy_and_permission(tmp_pat
 
     assert execution.policy_result.eligible is True
     assert resolver_calls == [1]
-    assert permission_calls == [1]
+    assert permission_calls == [1, 1]
 
 
 def test_missing_intent_preempts_target_resolution_error(tmp_path, monkeypatch):

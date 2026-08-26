@@ -40,7 +40,39 @@ preflight 通过后才解析既有 OFFICE/PROJECT runtime target，并构造完�
 
 `save_user_profile` 仍只有 `new_content` 参数。它的 schema 中没有 `intent`、`explicit`、`user_requested`、scope、project ID 或 path，因此模型无法自行证明 eligibility。普通 Agent 推断、Tool output、scheduler/internal context 都默认没有 explicit write intent，不会自动持久化。
 
-完整 overwrite 语义保持：即使用户明确要求“记住 X”，模型仍需给出完整新 profile 后覆盖写入；PR 43 不加入 append、merge、dedup、history、revision 或 autonomous candidate queue。
+## PR 44：精确更新与去重
+
+在 lifecycle policy 通过并一次性绑定 runtime target 后，写入链路增加 exact-target comparison：
+
+```text
+explicit lifecycle policy
+    ↓
+resolved concrete target
+    ↓
+MEMORY_READ authorization
+    ↓
+current target bytes == new_content.encode("utf-8")?
+    ├─ yes → NOOP_EXACT_MATCH（不申请 MEMORY_WRITE）
+    └─ no / read blocked / comparison unavailable
+          ↓
+       MEMORY_WRITE permission
+          ↓ final ALLOW
+       atomic complete overwrite
+```
+
+比较只读取当前 concrete target，不调用 PROJECT → GLOBAL effective-profile fallback。它比较原始 persisted bytes 与 `new_content` 的 UTF-8 bytes；不会 `.strip()`、规范化空白/Markdown/大小写/Unicode，也不会做 fuzzy、semantic 或 LLM 比较。因此 `"Python\n"` 与 `"Python"` 是不同更新，legacy invalid UTF-8 bytes 也不会因 `errors="ignore"` 的逻辑读取结果而被误判为重复。
+
+当前 disposition 为：
+
+* `NOOP_EXACT_MATCH`：目标文件存在且 bytes 完全相同；仍要求可信 explicit intent 和 exact-target `MEMORY_READ`，但不触发 `MEMORY_WRITE` confirmation、临时文件或 replace。
+* `WRITE_REPLACE`：非空且与 concrete target 不同（包括 target 缺失）。
+* `WRITE_CLEAR`：空字符串且 target 不是 exact empty file（包括 target 缺失）；仍通过 atomic overwrite 创建或清空文件，不会删除文件。
+
+`MEMORY_READ` 被阻断或比较不可用时，系统不能证明重复，因而保守进入既有 `MEMORY_WRITE` permission；它绝不将比较失败视为 no-op。Tool 对 no-op 与真实写入保持相同成功文案，避免把 `save_user_profile` 变成模型可用的 profile equality oracle。
+
+PROJECT 去重严格 target-local：PROJECT profile 缺失、但 GLOBAL fallback 内容恰好相同，仍不是重复；在获得 `MEMORY_WRITE` ALLOW 后会 materialize PROJECT profile。反之，已存在且 bytes 相同的 PROJECT profile 才是 no-op。每次操作继续使用同一个 resolved target，既有 session grant 只能复用 changed write 的 permission，不能跳过 lifecycle 或 exact comparison。
+
+完整 overwrite 语义保持：即使用户明确要求“记住 X”，模型仍需给出完整新 profile 后覆盖写入；本阶段不加入 append、merge、revision、CAS 或 autonomous candidate queue。
 
 ## 空内容限制
 
@@ -48,6 +80,6 @@ preflight 通过后才解析既有 OFFICE/PROJECT runtime target，并构造完�
 
 ## 非目标与后续方向
 
-本 PR 未实现 autonomous memory、scheduler memory policy、candidate queue、content moderation、LLM write judge、importance scoring、dedup/merge/version/history、tombstone 或 compaction。
+本阶段未实现 autonomous memory、scheduler memory policy、candidate queue、content moderation、LLM write judge、importance scoring、fuzzy/semantic dedup、merge/version/history、CAS/locking、tombstone 或 compaction。并发更新仍是 last successfully completed atomic replace wins，可能产生 lost update；PR 44 不解决该问题。
 
 后续生命周期工作只需讨论什么内容可写、谁能触发写入、explicit 与 agent-suggested 的产品流程，以及 duplicate/update 质量控制；不应把这些能力倒灌为模型自我认证字段。

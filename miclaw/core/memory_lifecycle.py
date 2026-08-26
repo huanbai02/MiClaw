@@ -24,6 +24,14 @@ class MemoryWriteSource(str, Enum):
     AGENT_TOOL = "agent_tool"
 
 
+class MemoryUpdateDisposition(str, Enum):
+    """描述已获 lifecycle eligibility 的一次 profile 更新结果。"""
+
+    NOOP_EXACT_MATCH = "noop_exact_match"
+    WRITE_REPLACE = "write_replace"
+    WRITE_CLEAR = "write_clear"
+
+
 @dataclass(frozen=True)
 class MemoryWriteRequest:
     """描述一次不含路径或正文日志的 scoped profile 写入候选。"""
@@ -45,10 +53,12 @@ class MemoryWritePolicyResult:
 
 @dataclass(frozen=True)
 class MemoryWriteExecutionResult:
-    """保存 policy 与（仅 eligible 时）既有 permission 解析结果。"""
+    """保存 lifecycle、精确比较与（需要时）写入 permission 的结果。"""
 
     policy_result: MemoryWritePolicyResult
     authorization: MemoryAuthorization | None
+    disposition: MemoryUpdateDisposition | None = None
+    read_authorization: MemoryAuthorization | None = None
 
 
 _current_memory_write_intent: ContextVar[MemoryWriteIntent | None] = ContextVar(
@@ -115,7 +125,7 @@ def write_user_profile_with_policy(
     memory_dir: Path | str,
     content: object,
 ) -> MemoryWriteExecutionResult:
-    """按 lifecycle policy → permission → Store 的顺序写入 scoped user profile。
+    """按 lifecycle → exact read → write permission → Store 的顺序更新 profile。
 
     Args:
         memory_dir: 当前 runtime 配置使用的 Memory root。
@@ -138,10 +148,27 @@ def write_user_profile_with_policy(
     if not policy_result.eligible:
         return MemoryWriteExecutionResult(policy_result, None)
 
+    read_authorization = authorize_memory_access(target, "read", "save_user_profile")
+    disposition = (
+        MemoryUpdateDisposition.WRITE_CLEAR
+        if content == ""
+        else MemoryUpdateDisposition.WRITE_REPLACE
+    )
+    if (
+        read_authorization.final_result.decision is PermissionDecision.ALLOW
+        and read_authorization.target.store.matches_exact_content(content)
+    ):
+        return MemoryWriteExecutionResult(
+            policy_result,
+            None,
+            MemoryUpdateDisposition.NOOP_EXACT_MATCH,
+            read_authorization,
+        )
+
     authorization = authorize_memory_access(target, "update", "save_user_profile")
     if authorization.final_result.decision is PermissionDecision.ALLOW:
         authorization.target.store.write_profile(content)
-    return MemoryWriteExecutionResult(policy_result, authorization)
+    return MemoryWriteExecutionResult(policy_result, authorization, disposition, read_authorization)
 
 
 def _valid_scope(scope: object) -> bool:

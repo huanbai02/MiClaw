@@ -505,10 +505,11 @@ def test_memory_permission_prompt_and_audit_are_content_and_path_safe(tmp_path, 
     assert "成功覆写更新" in result
     assert [event["event_type"] for event in events] == [
         "permission_decision",
+        "permission_decision",
         "permission_confirmation",
     ]
-    assert [event["run_id"] for event in events] == ["memory-run", "memory-run"]
-    assert [event["step_id"] for event in events] == [1, 2]
+    assert [event["run_id"] for event in events] == ["memory-run", "memory-run", "memory-run"]
+    assert [event["step_id"] for event in events] == [1, 2, 3]
     assert request.target in prompt
     assert "memory_write" in prompt
     assert "project" in prompt
