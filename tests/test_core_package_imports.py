@@ -11,6 +11,8 @@ CANONICAL_MODULES = (
     "miclaw.core.agent.context_assembly",
     "miclaw.core.execution.models",
     "miclaw.core.execution.state",
+    "miclaw.core.execution.failures",
+    "miclaw.core.execution.retry",
     "miclaw.core.runtime.config",
     "miclaw.core.runtime.workspace",
     "miclaw.core.runtime.bus",
