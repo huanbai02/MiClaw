@@ -17,7 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import ANSI
 
-from .execution import invoke_provider
+from .execution import invoke_provider, preflight_tool_call_batch
 
 
 BASE_SYSTEM_PROMPT = (
@@ -189,6 +189,7 @@ def create_agent_app(
 
         # 解析大模型的回答并记录到日志
         if response.tool_calls:
+            preflight_tool_call_batch(response.tool_calls)
             for tool_call in response.tool_calls:
                 audit_logger.log_event(
                     thread_id=thread_id,

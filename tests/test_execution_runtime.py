@@ -9,7 +9,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.errors import GraphInterrupt
 
-from miclaw.core.agent.execution import AgentProviderFailure, invoke_provider, run_agent_execution
+from miclaw.core.agent.execution import (
+    AgentExecutionRuntimeError,
+    AgentProviderFailure,
+    DEFAULT_GRAPH_RECURSION_LIMIT,
+    apply_graph_recursion_limit,
+    invoke_provider,
+    run_agent_execution,
+)
 from miclaw.core.agent.graph import create_agent_app
 from miclaw.core.execution.failures import ExecutionFailureCode, ExecutionFailureSource
 from miclaw.core.execution.models import ExecutionStateValidationError, ExecutionStatus
@@ -236,6 +243,210 @@ def test_langgraph_interrupt_control_flow_propagates_without_failure_or_retry_pl
 
     with pytest.raises(GraphInterrupt):
         _run(invoke)
+
+
+def test_graph_recursion_error_is_non_retryable_execution_limit_failure():
+    """LangGraph hard bound 触发后由 runtime 归一化，且不会创建下一 attempt。"""
+    model_calls = 0
+
+    @tool
+    def loop_tool(value: int) -> str:
+        """执行一个有限测试 Tool。"""
+        return str(value)
+
+    class LoopModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            nonlocal model_calls
+            model_calls += 1
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "loop_tool", "args": {"value": model_calls}, "id": f"call-{model_calls}"}],
+            )
+
+    with patch("miclaw.core.agent.graph.get_provider", return_value=LoopModel()):
+        app = create_agent_app(tools=[loop_tool])
+
+    async def invoke():
+        return await app.ainvoke(
+            {"messages": [HumanMessage(content="loop")]},
+            config=apply_graph_recursion_limit(
+                {"configurable": {"thread_id": "thread-1", "run_id": "run-1"}}, recursion_limit=4
+            ),
+        )
+
+    result = _run(invoke)
+
+    assert model_calls >= 2
+    assert result.state.status is ExecutionStatus.FAILED
+    assert result.failure.source is ExecutionFailureSource.RUNTIME
+    assert result.failure.code is ExecutionFailureCode.EXECUTION_LIMIT_EXCEEDED
+    assert result.retry_evaluation == RetryEvaluation(
+        RetryDecision.DO_NOT_RETRY,
+        RetryDecisionReason.NON_RETRYABLE_FAILURE,
+    )
+    assert result.next_attempt is None
+
+
+def test_graph_recursion_limit_config_is_explicit_and_preserves_existing_fields():
+    """生产 config 增加 hard bound 时不覆盖 thread/checkpoint 等既有字段。"""
+    original = {"configurable": {"thread_id": "thread-1", "run_id": "run-1"}, "callbacks": ["callback"]}
+
+    resolved = apply_graph_recursion_limit(original)
+
+    assert resolved["recursion_limit"] == DEFAULT_GRAPH_RECURSION_LIMIT
+    assert resolved["configurable"] == original["configurable"]
+    assert resolved["callbacks"] == original["callbacks"]
+    assert "recursion_limit" not in original
+
+
+@pytest.mark.parametrize("recursion_limit", [0, -1, True, False, 1.0, "4", None])
+def test_graph_recursion_limit_requires_exact_positive_runtime_value(recursion_limit):
+    """hard bound 不接受 bool/coercion 或无效值。"""
+    with pytest.raises(AgentExecutionRuntimeError, match="^invalid_graph_recursion_limit$"):
+        apply_graph_recursion_limit({}, recursion_limit=recursion_limit)
+
+
+def test_repeated_tool_call_guard_blocks_real_toolnode_before_third_side_effect():
+    """真实 Agent path 的第 3 次相同 Tool request 不会进入 ToolNode。"""
+    model_calls = 0
+    tool_calls = 0
+
+    @tool
+    def repeated_tool(value: str) -> str:
+        """记录真实 ToolNode 侧副作用。"""
+        nonlocal tool_calls
+        tool_calls += 1
+        return value
+
+    class RepeatingModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            nonlocal model_calls
+            model_calls += 1
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "repeated_tool", "args": {"value": "same"}, "id": f"call-{model_calls}"}],
+            )
+
+    with patch("miclaw.core.agent.graph.get_provider", return_value=RepeatingModel()):
+        app = create_agent_app(tools=[repeated_tool])
+
+    async def invoke():
+        return await app.ainvoke({"messages": [HumanMessage(content="repeat")]})
+
+    result = _run(invoke)
+
+    assert model_calls == 3
+    assert tool_calls == 2
+    assert result.state.status is ExecutionStatus.FAILED
+    assert result.failure.code is ExecutionFailureCode.LOOP_GUARD_TRIGGERED
+    assert result.retry_evaluation == RetryEvaluation(
+        RetryDecision.DO_NOT_RETRY,
+        RetryDecisionReason.NON_RETRYABLE_FAILURE,
+    )
+    assert result.next_attempt is None
+
+
+def test_guard_blocks_entire_real_toolnode_batch_before_any_batch_side_effect():
+    """触发阈值的 multi-tool batch 在 ToolNode 前整体阻断。"""
+    model_calls = 0
+    repeated_calls = 0
+    other_calls = 0
+
+    @tool
+    def repeated_tool(value: str) -> str:
+        """记录重复 Tool 副作用。"""
+        nonlocal repeated_calls
+        repeated_calls += 1
+        return value
+
+    @tool
+    def other_tool(value: str) -> str:
+        """记录 batch 内其他 Tool 副作用。"""
+        nonlocal other_calls
+        other_calls += 1
+        return value
+
+    class BatchModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            nonlocal model_calls
+            model_calls += 1
+            if model_calls < 3:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "repeated_tool", "args": {"value": "same"}, "id": f"call-{model_calls}"}],
+                )
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "repeated_tool", "args": {"value": "same"}, "id": "call-3"},
+                    {"name": "other_tool", "args": {"value": "other"}, "id": "other-1"},
+                ],
+            )
+
+    with patch("miclaw.core.agent.graph.get_provider", return_value=BatchModel()):
+        app = create_agent_app(tools=[repeated_tool, other_tool])
+
+    async def invoke():
+        return await app.ainvoke({"messages": [HumanMessage(content="repeat")]})
+
+    result = _run(invoke)
+
+    assert model_calls == 3
+    assert repeated_calls == 2
+    assert other_calls == 0
+    assert result.failure.code is ExecutionFailureCode.LOOP_GUARD_TRIGGERED
+
+
+def test_guard_context_is_reset_between_execution_attempts():
+    """新的 top-level execution 从 fresh ContextVar guard state 开始。"""
+    model_calls = 0
+    tool_calls = 0
+
+    @tool
+    def repeated_tool(value: str) -> str:
+        """记录跨 execution 的 Tool 调用。"""
+        nonlocal tool_calls
+        tool_calls += 1
+        return value
+
+    class ResetModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            nonlocal model_calls
+            model_calls += 1
+            if model_calls in {1, 2, 4}:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "repeated_tool", "args": {"value": "same"}, "id": f"call-{model_calls}"}],
+                )
+            return AIMessage(content="done")
+
+    with patch("miclaw.core.agent.graph.get_provider", return_value=ResetModel()):
+        app = create_agent_app(tools=[repeated_tool])
+
+    async def first():
+        return await app.ainvoke({"messages": [HumanMessage(content="first")]})
+
+    async def second():
+        return await app.ainvoke({"messages": [HumanMessage(content="second")]})
+
+    first_result = _run(first, execution_id="execution-a")
+    second_result = _run(second, execution_id="execution-b")
+
+    assert first_result.state.status is ExecutionStatus.SUCCEEDED
+    assert second_result.state.status is ExecutionStatus.SUCCEEDED
+    assert tool_calls == 3
 
 
 def test_real_agent_toolnode_side_effect_is_not_replayed_when_retry_is_planned():

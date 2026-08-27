@@ -35,7 +35,7 @@ RetryEvaluation(decision, reason)
 - `provider_timeout`
 - `provider_transient_error`
 
-其余全部不可自动 retry。尤其 `permission_denied`、`permission_required`、`safety_blocked` 永不自动 retry；重复执行不能替代新的用户授权或安全决策。`unknown_error` 同样 fail closed。
+其余全部不可自动 retry。尤其 `permission_denied`、`permission_required`、`safety_blocked`、`execution_limit_exceeded` 与 `loop_guard_triggered` 永不自动 retry；重复执行不能替代新的用户授权或安全决策。`unknown_error` 同样 fail closed。
 
 先判断 failure 是否 retryable，再判断 budget。因此不可 retry 的 failure 即使已到上限，也返回 `non_retryable_failure`；retryable failure 在 `current_attempt >= max_attempts` 时返回 `attempts_exhausted`。超过 policy 上限的 attempt 属于无效 runtime state，稳定拒绝而非静默当作耗尽。
 

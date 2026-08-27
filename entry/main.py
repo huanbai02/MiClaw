@@ -12,7 +12,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
 from prompt_toolkit.application import get_app
 
-from miclaw.core.agent.execution import run_agent_execution
+from miclaw.core.agent.execution import apply_graph_recursion_limit, run_agent_execution
 from miclaw.core.agent.graph import create_agent_app
 from miclaw.core.runtime.config import DB_PATH
 from miclaw.core.runtime.bus import task_queue
@@ -97,6 +97,7 @@ async def async_main(trace_context: TraceContext | None = None):
         config = {"configurable": {"thread_id": "local_geek_master"}}
         if trace_context is not None:
             config["configurable"]["run_id"] = trace_context.run_id
+        config = apply_graph_recursion_limit(config)
 
         class SpinnerState:
             action_words = [

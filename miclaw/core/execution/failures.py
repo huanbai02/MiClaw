@@ -31,6 +31,8 @@ class ExecutionFailureCode(str, Enum):
     INVALID_TARGET = "invalid_target"
     INVALID_CONFIGURATION = "invalid_configuration"
     RUNTIME_ERROR = "runtime_error"
+    EXECUTION_LIMIT_EXCEEDED = "execution_limit_exceeded"
+    LOOP_GUARD_TRIGGERED = "loop_guard_triggered"
     UNKNOWN_ERROR = "unknown_error"
 
 

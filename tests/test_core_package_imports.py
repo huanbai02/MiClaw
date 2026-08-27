@@ -14,6 +14,7 @@ CANONICAL_MODULES = (
     "miclaw.core.execution.state",
     "miclaw.core.execution.failures",
     "miclaw.core.execution.retry",
+    "miclaw.core.execution.guards",
     "miclaw.core.runtime.config",
     "miclaw.core.runtime.workspace",
     "miclaw.core.runtime.bus",

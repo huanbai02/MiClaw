@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TypeVar
 from uuid import uuid4
 
-from langgraph.errors import GraphBubbleUp
+from langgraph.errors import GraphBubbleUp, GraphRecursionError
 
 from ..execution.failures import ExecutionFailure, ExecutionFailureCode, ExecutionFailureSource, provider_failure
+from ..execution.guards import (
+    ExecutionGuardPolicy,
+    ExecutionGuardState,
+    ExecutionGuardTriggered,
+    GuardDecision,
+    observe_tool_call_batch,
+)
 from ..execution.models import ExecutionState, ExecutionStatus
 from ..execution.retry import RetryDecision, RetryEvaluation, RetryPolicy, evaluate_retry
 from ..execution.state import (
@@ -25,6 +33,19 @@ from ..observability.trace import TraceContext, get_current_trace_context
 
 
 ResultT = TypeVar("ResultT")
+
+DEFAULT_GRAPH_RECURSION_LIMIT = 25
+@dataclass
+class _ExecutionGuardRuntime:
+    """跨 LangGraph node task 共享的单 attempt guard holder，仅保存安全 state。"""
+
+    state: ExecutionGuardState
+    policy: ExecutionGuardPolicy
+
+
+_execution_guard_runtime: ContextVar[_ExecutionGuardRuntime | None] = ContextVar(
+    "miclaw_execution_guard_runtime", default=None
+)
 
 
 class AgentExecutionRuntimeError(RuntimeError):
@@ -58,6 +79,41 @@ class AgentExecutionResult:
     failure: ExecutionFailure | None
     retry_evaluation: RetryEvaluation | None
     next_attempt: ExecutionState | None
+
+
+def apply_graph_recursion_limit(
+    config: dict[str, object],
+    *,
+    recursion_limit: int = DEFAULT_GRAPH_RECURSION_LIMIT,
+) -> dict[str, object]:
+    """合并 MiClaw-owned LangGraph hard bound，不覆盖既有 config 字段。
+
+    Args:
+        config: 现有 graph invocation config。
+        recursion_limit: runtime-owned LangGraph hard bound；生产调用使用默认值。
+
+    Returns:
+        保留原字段并显式带有 recursion_limit 的新 config。
+    """
+    if type(config) is not dict:
+        raise AgentExecutionRuntimeError("invalid_graph_config")
+    if type(recursion_limit) is not int or recursion_limit < 1:
+        raise AgentExecutionRuntimeError("invalid_graph_recursion_limit")
+    merged = dict(config)
+    merged["recursion_limit"] = recursion_limit
+    return merged
+
+
+def preflight_tool_call_batch(tool_calls: object) -> None:
+    """在 ToolNode 前原子预检当前 attempt 的 AIMessage Tool batch。"""
+    runtime = _execution_guard_runtime.get()
+    if runtime is None:
+        return
+    evaluation = observe_tool_call_batch(runtime.state, tool_calls, runtime.policy)
+    if evaluation.decision is GuardDecision.BLOCK:
+        assert evaluation.reason is not None
+        raise ExecutionGuardTriggered(evaluation.reason)
+    runtime.state = evaluation.state
 
 
 def new_execution_id() -> str:
@@ -128,12 +184,17 @@ async def run_agent_execution(
     resolved_execution_id = new_execution_id() if execution_id is None else execution_id
     pending = create_pending_execution(resolved_execution_id)
     running = start_execution(pending, run_id=active_trace.run_id, started_at=clock())
+    guard_token = _execution_guard_runtime.set(_ExecutionGuardRuntime(ExecutionGuardState(), ExecutionGuardPolicy()))
     try:
         output = await invoke()
     except asyncio.CancelledError:
         raise
     except GraphBubbleUp:
         raise
+    except GraphRecursionError:
+        failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.EXECUTION_LIMIT_EXCEEDED)
+    except ExecutionGuardTriggered:
+        failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.LOOP_GUARD_TRIGGERED)
     except AgentProviderFailure as exc:
         failure = exc.failure
     except Exception:
@@ -141,6 +202,8 @@ async def run_agent_execution(
     else:
         succeeded = mark_execution_succeeded(running, finished_at=clock())
         return AgentExecutionResult(output, succeeded, None, None, None)
+    finally:
+        _execution_guard_runtime.reset(guard_token)
 
     failed = mark_execution_failed(running, finished_at=clock())
     evaluation = evaluate_retry(failure, current_attempt=failed.attempt, policy=retry_policy)
