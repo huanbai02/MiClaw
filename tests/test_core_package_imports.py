@@ -9,6 +9,8 @@ CANONICAL_MODULES = (
     "miclaw.core.agent.graph",
     "miclaw.core.agent.context",
     "miclaw.core.agent.context_assembly",
+    "miclaw.core.execution.models",
+    "miclaw.core.execution.state",
     "miclaw.core.runtime.config",
     "miclaw.core.runtime.workspace",
     "miclaw.core.runtime.bus",
