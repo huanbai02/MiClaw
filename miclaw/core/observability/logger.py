@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime.config import get_log_file_path
-from .trace import get_current_trace_context
+from .trace import TraceContext, get_current_trace_context
 
 # 内存队列 + 守护线程
 class JSONLEventLogger:
@@ -77,7 +77,17 @@ class JSONLEventLogger:
                 self.log_queue.task_done()
 
     # 前台调用的埋点方法
-    def log_event(self, thread_id: str, event: str, **kwargs):
+    def log_event(
+        self,
+        thread_id: str,
+        event: str,
+        *,
+        trace_context: TraceContext | None = None,
+        **kwargs,
+    ):
+        """写入事件；显式 TraceContext 优先于环境 ContextVar。"""
+        if trace_context is not None and type(trace_context) is not TraceContext:
+            raise ValueError("invalid_trace_context")
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         log_item = {
@@ -86,13 +96,13 @@ class JSONLEventLogger:
             "event": event,
             **kwargs
         }
-        self._apply_trace_context(log_item)
+        self._apply_trace_context(log_item, trace_context=trace_context)
 
         self.log_queue.put(log_item)
 
-    def _apply_trace_context(self, log_item: dict) -> None:
-        """在存在当前 TraceContext 时，为 event 补充 run_id 和 step_id。"""
-        context = get_current_trace_context()
+    def _apply_trace_context(self, log_item: dict, *, trace_context: TraceContext | None = None) -> None:
+        """以显式 context 或当前 ContextVar 为 event 补充 run_id 和 step_id。"""
+        context = trace_context if trace_context is not None else get_current_trace_context()
         if context is None:
             return
 

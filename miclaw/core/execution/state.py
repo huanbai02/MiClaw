@@ -13,6 +13,27 @@ class ExecutionTransitionError(ValueError):
     """表示不含 identity/detail 的稳定非法状态转换。"""
 
 
+LEGAL_EXECUTION_TRANSITIONS = frozenset(
+    {
+        (ExecutionStatus.PENDING, ExecutionStatus.RUNNING),
+        (ExecutionStatus.PENDING, ExecutionStatus.CANCELLED),
+        (ExecutionStatus.RUNNING, ExecutionStatus.SUCCEEDED),
+        (ExecutionStatus.RUNNING, ExecutionStatus.FAILED),
+        (ExecutionStatus.RUNNING, ExecutionStatus.INTERRUPTED),
+        (ExecutionStatus.RUNNING, ExecutionStatus.CANCELLED),
+    }
+)
+
+
+def is_legal_execution_transition(from_status: ExecutionStatus, to_status: ExecutionStatus) -> bool:
+    """返回 PR47 固定 attempt 状态矩阵是否允许该转换。"""
+    return (
+        type(from_status) is ExecutionStatus
+        and type(to_status) is ExecutionStatus
+        and (from_status, to_status) in LEGAL_EXECUTION_TRANSITIONS
+    )
+
+
 def create_pending_execution(
     execution_id: str,
     *,
@@ -59,7 +80,7 @@ def start_execution(
         run_id: 本 attempt 对应的 existing trace run identity。
         started_at: timezone-aware 开始时间。
     """
-    _require_status(state, ExecutionStatus.PENDING)
+    _require_transition(state, ExecutionStatus.RUNNING)
     if type(run_id) is not str or not run_id.strip():
         raise ExecutionStateValidationError("invalid_run_id")
     return replace(state, status=ExecutionStatus.RUNNING, run_id=run_id, started_at=started_at)
@@ -82,9 +103,7 @@ def mark_execution_interrupted(state: ExecutionState, *, finished_at: datetime) 
 
 def cancel_execution(state: ExecutionState, *, finished_at: datetime) -> ExecutionState:
     """取消 PENDING 或 RUNNING attempt，terminal attempt 不可重复取消。"""
-    _require_state(state)
-    if state.status not in {ExecutionStatus.PENDING, ExecutionStatus.RUNNING}:
-        raise ExecutionTransitionError("invalid_execution_transition")
+    _require_transition(state, ExecutionStatus.CANCELLED)
     return replace(state, status=ExecutionStatus.CANCELLED, finished_at=finished_at)
 
 
@@ -94,8 +113,15 @@ def _finish_running_execution(
     finished_at: datetime,
 ) -> ExecutionState:
     """完成 RUNNING attempt 的共享终结转换。"""
-    _require_status(state, ExecutionStatus.RUNNING)
+    _require_transition(state, status)
     return replace(state, status=status, finished_at=finished_at)
+
+
+def _require_transition(state: ExecutionState, target: ExecutionStatus) -> None:
+    """基于共享固定矩阵验证 domain helper 的 source → target 转换。"""
+    _require_state(state)
+    if not is_legal_execution_transition(state.status, target):
+        raise ExecutionTransitionError("invalid_execution_transition")
 
 
 def _require_status(state: ExecutionState, expected: ExecutionStatus) -> None:

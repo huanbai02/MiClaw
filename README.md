@@ -132,6 +132,9 @@ miclaw skills lint --help
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
 - 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
 - Trace 查看：通过 `miclaw trace <run_id>` 查看指定运行的安全事件摘要。
+- Execution Runtime：顶层 Agent 调用具备受限 attempt 状态、循环保护、持久化 metadata 与定向安全恢复；不自动重放图或 Tool。
+
+Phase 5 — Task Execution & Recovery ✅。详见 [`docs/phase5_execution_runtime.md`](docs/phase5_execution_runtime.md)。
 
 ## 项目结构
 

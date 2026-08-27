@@ -35,15 +35,15 @@ LangGraph native `RetryPolicy` 仍是 node/task-level primitive，不等同于 M
 - **PR49**：Execution Runtime Integration & Retry Attempt Planning
 - **PR50**：Loop Guards & Stop Conditions
 - **PR51**：Checkpoint / Restart Recovery & Safe Attempt Resume
-- **PR52**：Execution E2E Hardening
+- **PR52**：Execution E2E Hardening（Phase 5 完成）
 
-PR51 建立 checkpoint/recovery 边界前，next attempt 不得 replay whole graph。
+PR51 已建立独立 execution metadata、checkpoint correlation 与定向安全恢复；它仍不 replay whole graph。
 
 ## 当前非目标
 
 - whole-graph 或 Tool automatic retry
 - side-effect idempotency、backoff、jitter
 - LangGraph/ LangChain retry middleware
-- persistence、checkpoint resume、Scheduler retry
+- Scheduler retry
 - loop guard、cancellation CLI、distributed execution
 - execution observability event
