@@ -17,6 +17,8 @@ from langchain_core.runnables import RunnableConfig
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import ANSI
 
+from .execution import invoke_provider
+
 
 BASE_SYSTEM_PROMPT = (
     "你是 MiClaw，一个聪明、高效、说话自然的 AI 助手。\n\n"
@@ -135,7 +137,9 @@ def create_agent_app(
                 )
 
             # 这里可以用便宜模型
-            new_summary_response = llm.invoke([HumanMessage(content=summary_prompt)], config={"callbacks":[]})
+            new_summary_response = invoke_provider(
+                lambda: llm.invoke([HumanMessage(content=summary_prompt)], config={"callbacks": []})
+            )
             active_summary = new_summary_response.content
 
             # 更新摘要
@@ -181,7 +185,7 @@ def create_agent_app(
             message_count=len(msgs_for_llm)
         )
 
-        response = llm_with_tools.invoke(msgs_for_llm)
+        response = invoke_provider(lambda: llm_with_tools.invoke(msgs_for_llm))
 
         # 解析大模型的回答并记录到日志
         if response.tool_calls:

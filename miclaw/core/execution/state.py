@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 
 from .models import ExecutionState, ExecutionStatus, ExecutionStateValidationError
+from .retry import RetryDecision, RetryEvaluation
 
 
 class ExecutionTransitionError(ValueError):
@@ -24,6 +25,25 @@ def create_pending_execution(
         attempt: 从 1 开始的 attempt number。
     """
     return ExecutionState(execution_id, attempt, ExecutionStatus.PENDING, None, None, None)
+
+
+def create_next_execution_attempt(
+    failed_state: ExecutionState,
+    evaluation: RetryEvaluation,
+) -> ExecutionState:
+    """为允许 retry 的 FAILED attempt 创建同 logical execution 的下一 PENDING attempt。
+
+    Args:
+        failed_state: 已结束且 status 为 FAILED 的当前 attempt。
+        evaluation: 当前 failure 的 retry eligibility decision。
+
+    Raises:
+        ExecutionTransitionError: source state 或 retry decision 不允许创建下一 attempt 时抛出。
+    """
+    _require_status(failed_state, ExecutionStatus.FAILED)
+    if type(evaluation) is not RetryEvaluation or evaluation.decision is not RetryDecision.RETRY:
+        raise ExecutionTransitionError("invalid_execution_transition")
+    return create_pending_execution(failed_state.execution_id, attempt=failed_state.attempt + 1)
 
 
 def start_execution(

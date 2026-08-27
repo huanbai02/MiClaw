@@ -7,6 +7,7 @@ import pytest
 
 CANONICAL_MODULES = (
     "miclaw.core.agent.graph",
+    "miclaw.core.agent.execution",
     "miclaw.core.agent.context",
     "miclaw.core.agent.context_assembly",
     "miclaw.core.execution.models",

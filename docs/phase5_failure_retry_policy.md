@@ -41,7 +41,7 @@ RetryEvaluation(decision, reason)
 
 ## 与 PR47 的关系
 
-PR47 terminal attempt 不能重新打开。未来 PR49 若获得 `RetryDecision.RETRY`，应使用相同 `execution_id` 创建 `attempt + 1` 的新 `PENDING` attempt；不是让 `FAILED → RUNNING`。
+PR47 terminal attempt 不能重新打开。PR49 在 `RetryDecision.RETRY` 时只使用相同 `execution_id` 规划 `attempt + 1` 的新 `PENDING` attempt；不是让 `FAILED → RUNNING`，也不会自动 replay graph。
 
 ## 当前非目标
 

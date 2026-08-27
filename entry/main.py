@@ -12,6 +12,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
 from prompt_toolkit.application import get_app
 
+from miclaw.core.agent.execution import run_agent_execution
 from miclaw.core.agent.graph import create_agent_app
 from miclaw.core.runtime.config import DB_PATH
 from miclaw.core.runtime.bus import task_queue
@@ -157,7 +158,8 @@ async def async_main(trace_context: TraceContext | None = None):
                 spinner.is_tool_calling = False
                 
                 inputs = {"messages": [HumanMessage(content=user_input)]}
-                try:
+
+                async def invoke_graph_once():
                     async for event in app.astream(inputs, config=config, stream_mode="updates"):
                         for node_name, node_data in event.items():
                             if node_name == "agent":
@@ -184,9 +186,15 @@ async def async_main(trace_context: TraceContext | None = None):
                             elif node_name != "agent": 
                                 spinner.is_tool_calling = False 
                                 
-                except Exception as e:
+
+                execution = await run_agent_execution(
+                    invoke_graph_once,
+                    trace_context=trace_context,
+                )
+                if execution.failure is not None:
                     spinner.is_spinning = False
-                    cprint(f"  \033[31m[ ⚠️ 引擎异常 : {e} ]\033[0m")
+                    cprint(f"  \033[31m[ ⚠️ 引擎执行失败 : {execution.failure.code.value} ]\033[0m")
+
 
                 spinner.is_spinning = False
                 cprint() # 空出舒适的行距
