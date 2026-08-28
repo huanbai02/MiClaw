@@ -8,10 +8,11 @@ from typer.testing import CliRunner
 
 from entry import monitor
 from entry.cli import app as cli_app
-from miclaw.core import agent
-from miclaw.core.logger import JSONLEventLogger
-from miclaw.core.redaction import DEPTH_LIMIT_REACHED, LARGE_INTEGER_OMITTED, REDACTED
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.observability.logger import JSONLEventLogger
+from miclaw.core.observability.redaction import DEPTH_LIMIT_REACHED, LARGE_INTEGER_OMITTED, REDACTED
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
 
 
 FORBIDDEN_MARKERS = (
@@ -163,6 +164,7 @@ def test_agent_jsonl_to_monitor_logs_and_trace_stays_redacted(tmp_path, monkeypa
     log_file = tmp_path / "agent.jsonl"
     logger = JSONLEventLogger(log_file=log_file)
     monkeypatch.setattr(agent, "audit_logger", logger)
+    monkeypatch.setattr(memory_permissions, "_permission_audit_logger", lambda *args, **kwargs: None)
     trace_token = set_current_trace_context(TraceContext(run_id="redaction-run"))
     try:
         app = agent.create_agent_app(tools=[_ObservabilityFixtureTool(result=tool_output)])

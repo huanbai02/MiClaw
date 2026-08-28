@@ -11,8 +11,8 @@ from rich.align import Align
 from rich import box
 from datetime import datetime
 
-from miclaw.core.config import get_log_file_path
-from miclaw.core.redaction import REDACTED, sanitize_value, summarize_content, summarize_tool_args
+from miclaw.core.runtime.config import get_log_file_path
+from miclaw.core.observability.redaction import REDACTED, sanitize_value, summarize_content, summarize_tool_args
 
 
 miclaw_theme = Theme({
@@ -191,6 +191,23 @@ def _safe_display_text(value: object, fallback: str = "unknown") -> str:
     return "<content omitted>"
 
 
+def _safe_known_value(value: object, allowed: set[str], fallback: str = "unknown") -> str:
+    """只显示白名单枚举值，避免 formatter 回显损坏事件字段。"""
+    return value if type(value) is str and value in allowed else fallback
+
+
+def _safe_nonnegative_int(value: object, maximum: int = 1_000_000) -> str:
+    """只显示合理范围内的 metadata count，避免把任意值格式化进 CLI。"""
+    if type(value) is int and 0 <= value <= maximum:
+        return str(value)
+    return "unknown"
+
+
+def _safe_bool(value: object) -> str:
+    """只接受严格 bool，避免 truthy malformed metadata 影响展示。"""
+    return str(value).lower() if type(value) is bool else "unknown"
+
+
 def format_trace_prefix(event: dict) -> str:
     """生成短 trace 前缀，兼容没有 run_id/step_id 的旧日志。"""
     parts = []
@@ -323,6 +340,61 @@ def format_ai_message_event(event: dict) -> str:
     return f"AI MESSAGE [{summarize_content(event.get('content'))}]"
 
 
+def format_memory_retrieval_event(event: dict) -> str:
+    """生成仅展示 retrieval outcome metadata 的安全摘要。"""
+    raw_kinds = event.get("requested_kinds")
+    if type(raw_kinds) in (list, tuple) and len(raw_kinds) <= 1 and all(
+        type(kind) is str and kind == "user_profile" for kind in raw_kinds
+    ):
+        requested_kinds = ",".join(raw_kinds) or "none"
+    else:
+        requested_kinds = "unknown"
+
+    blocked = _safe_bool(event.get("blocked"))
+    result_count = _safe_nonnegative_int(event.get("result_count"), maximum=1)
+    if blocked == "true":
+        reason = _safe_known_value(
+            event.get("block_reason_code"),
+            {"permission_denied", "permission_required", "invalid_memory_scope"},
+        )
+        return (
+            "MEMORY RETRIEVAL "
+            f"[kinds={requested_kinds} count={result_count} blocked=true reason={reason}]"
+        )
+
+    selected_kind = _safe_known_value(event.get("selected_kind"), {"user_profile"}, fallback="none")
+    selected_scope = _safe_known_value(event.get("selected_scope"), {"global", "project"}, fallback="none")
+    fallback = _safe_bool(event.get("used_global_fallback"))
+    return (
+        "MEMORY RETRIEVAL "
+        f"[kinds={requested_kinds} count={result_count} selected={selected_kind} "
+        f"scope={selected_scope} project_fallback={fallback} blocked={blocked}]"
+    )
+
+
+def format_context_assembly_event(event: dict) -> str:
+    """生成仅展示 context budget counts/flags 的安全摘要。"""
+    numeric_fields = (
+        ("budget", "supplemental_char_budget"),
+        ("used", "used_dynamic_chars"),
+        ("summary_chars", "summary_chars_used"),
+        ("memory_chars", "memory_chars_used"),
+        ("records", "memory_record_count"),
+        ("escaped_markers", "escaped_marker_count"),
+    )
+    flag_fields = (
+        ("summary_truncated", "summary_truncated"),
+        ("summary_omitted", "summary_omitted_due_to_budget"),
+        ("memory_truncated", "memory_truncated"),
+        ("memory_omitted", "memory_omitted_due_to_budget"),
+        ("framed", "historical_context_framed"),
+    )
+    parts = [_safe_nonnegative_int(event.get(field)) for _, field in numeric_fields]
+    named_parts = [f"{name}={value}" for (name, _), value in zip(numeric_fields, parts)]
+    named_parts.extend(f"{name}={_safe_bool(event.get(field))}" for name, field in flag_fields)
+    return f"CONTEXT ASSEMBLY [{' '.join(named_parts)}]"
+
+
 def format_log_event_for_cli(event: dict) -> str:
     """生成适合 `miclaw logs --tail` 的安全单行摘要。"""
     event_type = _safe_display_text(event.get("event") or event.get("event_type") or "unknown")
@@ -339,6 +411,10 @@ def format_log_event_for_cli(event: dict) -> str:
         return f"{trace_prefix}LLM INPUT message_count={message_count}"
     if event_type == "ai_message":
         return f"{trace_prefix}{format_ai_message_event(event)}"
+    if event_type == "memory_retrieval":
+        return f"{trace_prefix}{format_memory_retrieval_event(event)}"
+    if event_type == "context_assembly":
+        return f"{trace_prefix}{format_context_assembly_event(event)}"
     if event_type == "system_action":
         return f"{trace_prefix}SYSTEM ACTION [{summarize_content(event.get('content'))}]"
     if event_type == "parse_error":
@@ -385,6 +461,14 @@ def render_event(line: str | dict):
 
     elif event == "ai_message":
         console.print(f"{prefix}[ai_message]✦ {escape(format_ai_message_event(data))}[/ai_message]")
+
+    elif event == "memory_retrieval":
+        summary = escape(format_memory_retrieval_event(data))
+        console.print(f"{prefix}[info]✦ {summary}[/info]")
+
+    elif event == "context_assembly":
+        summary = escape(format_context_assembly_event(data))
+        console.print(f"{prefix}[info]✦ {summary}[/info]")
 
     elif event == "system_action":
         action = escape(summarize_content(data.get("content")))

@@ -9,9 +9,9 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.logger import build_permission_confirmation_event, build_permission_decision_event
-from miclaw.core.permissions import (
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.observability.logger import build_permission_confirmation_event, build_permission_decision_event
+from miclaw.core.security.permissions import (
     PermissionDecision,
     allow,
     ask,
@@ -20,7 +20,7 @@ from miclaw.core.permissions import (
     reset_permission_confirmation_handler,
     set_permission_confirmation_handler,
 )
-from miclaw.core.tools.sandbox_tools import execute_office_shell, list_office_files, read_office_file, write_office_file
+from miclaw.core.tools.sandbox import execute_office_shell, list_office_files, read_office_file, write_office_file
 
 
 @pytest.fixture()
@@ -164,7 +164,7 @@ def test_permission_ask_logs_event_and_does_not_execute(office, audit_events, mo
     assert event["requires_confirmation"] is True
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_shell_default_ask_logs_event_and_does_not_call_subprocess(mock_subprocess, office, audit_events):
     result = execute_office_shell.invoke({"command": "echo hello"})
 
@@ -213,7 +213,7 @@ def test_file_event_target_is_office_relative_not_absolute(office, audit_events)
     assert str(office) not in event["target"]
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_shell_event_does_not_include_raw_stdout_or_stderr(mock_subprocess, office, audit_events, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
     mock_result = mock_subprocess.return_value
@@ -348,7 +348,7 @@ def test_confirmation_audit_preserves_policy_and_confirmation_decisions(
     assert event["final_decision"] == expected_decision
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_shell_confirmation_audit_does_not_include_command_or_secrets(
     mock_subprocess,
     office,

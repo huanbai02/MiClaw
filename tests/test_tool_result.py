@@ -1,6 +1,6 @@
 import json
 
-from miclaw.core.permissions import PermissionDecision
+from miclaw.core.security.permissions import PermissionDecision
 from miclaw.core.tools.result import (
     format_tool_result_for_model,
     tool_error,

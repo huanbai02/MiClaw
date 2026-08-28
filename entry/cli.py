@@ -10,8 +10,8 @@ from rich.status import Status
 from dotenv import set_key, load_dotenv, unset_key
 import sys
 
-from miclaw.core.provider import get_provider
-from miclaw.core.permissions import (
+from miclaw.core.llm.provider import get_provider
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionRequest,
@@ -21,7 +21,7 @@ from miclaw.core.permissions import (
     set_permission_confirmation_handler,
     set_session_permission_grants,
 )
-from miclaw.core.workspace import reset_active_project_root, set_active_project_root
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 from langchain_core.messages import HumanMessage
 
 ENTRY_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -192,6 +192,9 @@ def _safe_permission_target(request: PermissionRequest) -> str:
     if request.capability is PermissionCapability.MCP_TOOL:
         target = str(request.target or "")
         return _safe_prompt_text(target) if _mcp_prompt_identity_parts(target) else "hidden"
+    if request.capability in {PermissionCapability.MEMORY_READ, PermissionCapability.MEMORY_WRITE}:
+        target = str(request.target or "")
+        return _safe_prompt_text(target) if _is_safe_memory_identity(target) else "hidden"
     if request.capability not in {PermissionCapability.FILE_READ, PermissionCapability.FILE_WRITE}:
         return "hidden"
 
@@ -208,7 +211,7 @@ def _safe_workspace_scope(request: PermissionRequest) -> str:
         identity = _mcp_prompt_identity_parts(str(request.target or ""))
         return f"mcp:{identity[0]}" if identity else "hidden"
     scope = str(request.metadata.get("workspace_scope") or "office")
-    return scope if scope in {"office", "project"} else "hidden"
+    return scope if scope in {"office", "project", "global"} else "hidden"
 
 
 def _mcp_prompt_identity_parts(target: str) -> tuple[str, str] | None:
@@ -221,6 +224,19 @@ def _mcp_prompt_identity_parts(target: str) -> tuple[str, str] | None:
     if not all(value and len(value) <= 80 and set(value) <= allowed for value in (server_id, tool_name)):
         return None
     return server_id, tool_name
+
+
+def _is_safe_memory_identity(target: str) -> bool:
+    """只展示 GLOBAL 或 opaque PROJECT user-profile identity。"""
+    if target == "user-profile":
+        return True
+    prefix, separator, project_id = target.partition("::")
+    return (
+        prefix == "user-profile"
+        and separator == "::"
+        and len(project_id) == 24
+        and all(char in "0123456789abcdef" for char in project_id)
+    )
 
 
 def format_permission_confirmation_prompt(request: PermissionRequest, result: PermissionResult) -> str:
@@ -326,7 +342,7 @@ def list_skills_command():
 
     # config 初始化仍会输出绝对 workspace path，此处仅隔离 import side effect。
     with redirect_stdout(StringIO()):
-        from miclaw.core.skill_loader import list_skill_metadata
+        from miclaw.core.skills.loader import list_skill_metadata
 
     skills = list_skill_metadata()
     if not skills:
@@ -349,7 +365,7 @@ def lint_skills_command():
     from io import StringIO
 
     with redirect_stdout(StringIO()):
-        from miclaw.core.skill_loader import validate_skills
+        from miclaw.core.skills.loader import validate_skills
 
     results = validate_skills()
     if not results:

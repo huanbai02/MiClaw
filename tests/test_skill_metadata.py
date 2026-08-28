@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from miclaw.core import skill_loader
-from miclaw.core.skill_loader import (
+import miclaw.core.skills.loader as skill_loader
+from miclaw.core.skills.loader import (
     SkillMetadataSeverity,
     validate_skill_metadata,
 )

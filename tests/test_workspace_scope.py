@@ -1,7 +1,7 @@
 from pathlib import Path
 
-import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.workspace import WorkspaceRoot, WorkspaceScope
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.runtime.workspace import WorkspaceRoot, WorkspaceScope
 
 
 def test_default_active_workspace_root_resolves_to_office(tmp_path, monkeypatch):

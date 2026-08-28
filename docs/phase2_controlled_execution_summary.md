@@ -301,7 +301,7 @@ Hard-blocked shell command 在 permission evaluation 之前停止，因此不会
 
 `permission_decision` 已有专门的安全摘要渲染。`permission_confirmation` 会写入 JSONL；当前 monitor/log CLI 对未专门格式化的 event 使用 generic fallback，不展示 full metadata。`miclaw logs --tail` 和 `miclaw trace <run_id>` 复用 `format_log_event_for_cli()`：其中 tool-call 只显示参数 key、presence 和 length，tool-result 只显示 tool name，不输出底层 result content。`miclaw trace <run_id>` 只筛选和排序 JSONL event，不读取 checkpoint、不 replay，也不 re-execute tool。
 
-上述限制不等于底层 JSONL 已完成统一脱敏。`miclaw/core/agent.py` 当前仍会：
+上述限制不等于底层 JSONL 已完成统一脱敏。`miclaw/core/agent/graph.py` 当前仍会：
 
 - 在 agent `tool_call` event 中写入 raw `tool_call.args`。
 - 在 agent `tool_result` event 中写入 `msg.content[:200]` 作为 `result_summary`。

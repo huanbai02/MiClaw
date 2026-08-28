@@ -1,8 +1,8 @@
 import json
 
-from miclaw.core.logger import JSONLEventLogger, build_permission_decision_event
-from miclaw.core.permissions import PermissionCapability, PermissionRequest, RiskLevel, allow
-from miclaw.core.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
+from miclaw.core.observability.logger import JSONLEventLogger, build_permission_decision_event
+from miclaw.core.security.permissions import PermissionCapability, PermissionRequest, RiskLevel, allow
+from miclaw.core.observability.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
 
 
 def _read_events(log_file):

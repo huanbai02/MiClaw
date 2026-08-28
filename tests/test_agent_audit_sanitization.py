@@ -3,10 +3,11 @@ import json
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 
-from miclaw.core import agent
-from miclaw.core.logger import JSONLEventLogger
-from miclaw.core.redaction import CONTENT_OMITTED, REDACTED, REDACTION_FAILED, summarize_tool_args
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
+import miclaw.core.agent.graph as agent
+import miclaw.core.memory.permissions as memory_permissions
+from miclaw.core.observability.logger import JSONLEventLogger
+from miclaw.core.observability.redaction import CONTENT_OMITTED, REDACTED, REDACTION_FAILED, summarize_tool_args
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
 
 
 class _SequentialModel:
@@ -94,6 +95,7 @@ def test_agent_jsonl_events_sanitize_tool_args_results_and_ai_content(tmp_path, 
     log_file = tmp_path / "agent.jsonl"
     logger = JSONLEventLogger(log_file=log_file)
     monkeypatch.setattr(agent, "audit_logger", logger)
+    monkeypatch.setattr(memory_permissions, "_permission_audit_logger", lambda *args, **kwargs: None)
     trace_token = set_current_trace_context(TraceContext(run_id="audit-run"))
     try:
         app = agent.create_agent_app(tools=[audit_fixture_tool])

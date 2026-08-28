@@ -12,11 +12,14 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
 from prompt_toolkit.application import get_app
 
-from miclaw.core.agent import create_agent_app
-from miclaw.core.config import DB_PATH
-from miclaw.core.bus import task_queue
-from miclaw.core.heartbeat import pacemaker_loop
-from miclaw.core.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
+from miclaw.core.agent.execution import apply_graph_recursion_limit, run_agent_execution
+from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
+from miclaw.core.agent.graph import create_agent_app
+from miclaw.core.runtime.config import DB_PATH, EXECUTION_DB_PATH
+from miclaw.core.runtime.bus import task_queue
+from miclaw.core.runtime.execution_store import ExecutionStore
+from miclaw.core.scheduler.heartbeat import pacemaker_loop
+from miclaw.core.observability.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -92,10 +95,12 @@ async def async_main(trace_context: TraceContext | None = None):
     current_model = os.getenv("DEFAULT_MODEL", "glm-5")
 
     async with AsyncSqliteSaver.from_conn_string(DB_PATH) as memory:
+        execution_store = ExecutionStore(EXECUTION_DB_PATH)
         app = create_agent_app(provider_name=current_provider, model_name=current_model, checkpointer=memory)
         config = {"configurable": {"thread_id": "local_geek_master"}}
         if trace_context is not None:
             config["configurable"]["run_id"] = trace_context.run_id
+        config = apply_graph_recursion_limit(config)
 
         class SpinnerState:
             action_words = [
@@ -157,8 +162,17 @@ async def async_main(trace_context: TraceContext | None = None):
                 spinner.is_tool_calling = False
                 
                 inputs = {"messages": [HumanMessage(content=user_input)]}
-                try:
-                    async for event in app.astream(inputs, config=config, stream_mode="updates"):
+                checkpoint_thread_id = config["configurable"]["thread_id"]
+                checkpoint_run_id = new_checkpoint_run_id()
+                invocation_config = apply_checkpoint_correlation(config, checkpoint_run_id)
+
+                async def invoke_graph_once():
+                    async for event in app.astream(
+                        inputs,
+                        config=invocation_config,
+                        stream_mode="updates",
+                        durability="sync",
+                    ):
                         for node_name, node_data in event.items():
                             if node_name == "agent":
                                 last_msg = node_data["messages"][-1]
@@ -184,9 +198,27 @@ async def async_main(trace_context: TraceContext | None = None):
                             elif node_name != "agent": 
                                 spinner.is_tool_calling = False 
                                 
-                except Exception as e:
+
+                async def checkpoint_id_provider():
+                    checkpoint_ref, _ = await latest_owned_checkpoint(
+                        app,
+                        checkpoint_thread_id,
+                        checkpoint_run_id,
+                    )
+                    return checkpoint_ref.checkpoint_id if checkpoint_ref is not None else None
+
+                execution = await run_agent_execution(
+                    invoke_graph_once,
+                    trace_context=trace_context,
+                    execution_store=execution_store,
+                    checkpoint_thread_id=checkpoint_thread_id,
+                    checkpoint_run_id=checkpoint_run_id,
+                    checkpoint_id_provider=checkpoint_id_provider,
+                )
+                if execution.failure is not None:
                     spinner.is_spinning = False
-                    cprint(f"  \033[31m[ ⚠️ 引擎异常 : {e} ]\033[0m")
+                    cprint(f"  \033[31m[ ⚠️ 引擎执行失败 : {execution.failure.code.value} ]\033[0m")
+
 
                 spinner.is_spinning = False
                 cprint() # 空出舒适的行距
@@ -239,13 +271,16 @@ async def async_main(trace_context: TraceContext | None = None):
 
             redraw_task.cancel() 
 
-        with patch_stdout():
-            worker = asyncio.create_task(agent_worker())
-            heartbeat_worker = asyncio.create_task(pacemaker_loop(check_interval=10))
-            await user_input_loop()
-            await task_queue.join()
-            worker.cancel()
-            heartbeat_worker.cancel()
+        try:
+            with patch_stdout():
+                worker = asyncio.create_task(agent_worker())
+                heartbeat_worker = asyncio.create_task(pacemaker_loop(check_interval=10))
+                await user_input_loop()
+                await task_queue.join()
+                worker.cancel()
+                heartbeat_worker.cancel()
+        finally:
+            execution_store.close()
 
 def main():
     trace_context = TraceContext(run_id=new_run_id())

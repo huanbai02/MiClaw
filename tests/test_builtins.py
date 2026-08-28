@@ -12,7 +12,7 @@ from miclaw.core.tools.builtins import (
     get_current_time,
     calculator
 )
-from miclaw.core.config import MEMORY_DIR, TASKS_FILE
+from miclaw.core.runtime.config import MEMORY_DIR, TASKS_FILE
 
 
 class TestBuiltInTools(unittest.TestCase):
@@ -62,22 +62,40 @@ class TestBuiltInTools(unittest.TestCase):
                 self.assertIn("计算出错", result)
 
     @patch('miclaw.core.tools.builtins.MEMORY_DIR', new_callable=lambda: tempfile.mkdtemp())
-    @patch('miclaw.core.tools.builtins.PROFILE_PATH', new_callable=lambda: tempfile.mktemp())
-    def test_save_user_profile(self, mock_profile_path, mock_memory_dir):
+    def test_save_user_profile(self, mock_memory_dir):
         """测试保存用户档案功能"""
         from miclaw.core.tools.builtins import save_user_profile
 
         import tempfile
         import os
+        from miclaw.core.security.permissions import (
+            PermissionConfirmationChoice,
+            reset_permission_confirmation_handler,
+            set_permission_confirmation_handler,
+        )
+        from miclaw.core.memory.lifecycle import (
+            MemoryWriteIntent,
+            reset_memory_write_intent,
+            set_memory_write_intent,
+        )
 
         # 测试保存功能
         test_content = "# 用户档案\n- 姓名：张三\n- 职业：工程师"
-        result = save_user_profile.invoke({"new_content": test_content})
+        confirmation_token = set_permission_confirmation_handler(
+            lambda request, policy: PermissionConfirmationChoice.ALLOW_ONCE
+        )
+        intent_token = set_memory_write_intent(MemoryWriteIntent.EXPLICIT_USER_REQUEST)
+        try:
+            result = save_user_profile.invoke({"new_content": test_content})
+        finally:
+            reset_memory_write_intent(intent_token)
+            reset_permission_confirmation_handler(confirmation_token)
         self.assertEqual(result, "记忆档案已成功覆写更新。新的人设画像已生效。")
 
+        profile_path = os.path.join(mock_memory_dir, "user_profile.md")
         # 验证文件已创建并包含正确内容
-        self.assertTrue(os.path.exists(mock_profile_path))
-        with open(mock_profile_path, 'r', encoding='utf-8') as f:
+        self.assertTrue(os.path.exists(profile_path))
+        with open(profile_path, 'r', encoding='utf-8') as f:
             saved_content = f.read()
         self.assertEqual(saved_content, test_content)
 

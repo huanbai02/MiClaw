@@ -18,15 +18,15 @@ class TestHeartbeatPacemaker(unittest.TestCase):
         self.original_tasks_file = None
         
         # 保存原始 TASKS_FILE 路径
-        import miclaw.core.config
-        self.original_tasks_file = miclaw.core.config.TASKS_FILE
+        import miclaw.core.runtime.config
+        self.original_tasks_file = miclaw.core.runtime.config.TASKS_FILE
         
         # 设置临时任务文件
-        miclaw.core.config.TASKS_FILE = self.temp_file.name
+        miclaw.core.runtime.config.TASKS_FILE = self.temp_file.name
         
         # 同时 patch heartbeat 模块中的引用
-        import miclaw.core.heartbeat
-        miclaw.core.heartbeat.TASKS_FILE = self.temp_file.name
+        import miclaw.core.scheduler.heartbeat
+        miclaw.core.scheduler.heartbeat.TASKS_FILE = self.temp_file.name
 
     def tearDown(self):
         """每个测试后清理临时文件"""
@@ -35,15 +35,15 @@ class TestHeartbeatPacemaker(unittest.TestCase):
             os.unlink(self.temp_file.name)
         
         # 恢复原始路径
-        import miclaw.core.config
-        miclaw.core.config.TASKS_FILE = self.original_tasks_file
+        import miclaw.core.runtime.config
+        miclaw.core.runtime.config.TASKS_FILE = self.original_tasks_file
         
-        import miclaw.core.heartbeat
-        miclaw.core.heartbeat.TASKS_FILE = self.original_tasks_file
+        import miclaw.core.scheduler.heartbeat
+        miclaw.core.scheduler.heartbeat.TASKS_FILE = self.original_tasks_file
 
     def test_no_tasks_file(self):
         """测试任务文件不存在时的行为"""
-        from miclaw.core.heartbeat import pacemaker_loop
+        from miclaw.core.scheduler.heartbeat import pacemaker_loop
         
         # 删除临时文件模拟不存在
         os.unlink(self.temp_file.name)
@@ -51,7 +51,7 @@ class TestHeartbeatPacemaker(unittest.TestCase):
         # 运行一个周期（不等待实际间隔）
         async def run_test():
             # 直接测试逻辑，不实际等待
-            import miclaw.core.heartbeat as hb
+            import miclaw.core.scheduler.heartbeat as hb
             # 模拟 TASKS_FILE 不存在
             with patch.object(hb, 'TASKS_FILE', '/nonexistent/path.json'):
                 # 不应该抛出异常
@@ -62,7 +62,7 @@ class TestHeartbeatPacemaker(unittest.TestCase):
 
     def test_empty_tasks_file(self):
         """测试任务文件为空时的行为"""
-        from miclaw.core.heartbeat import pacemaker_loop
+        from miclaw.core.scheduler.heartbeat import pacemaker_loop
         
         # 写入空内容
         with open(self.temp_file.name, 'w') as f:
@@ -70,7 +70,7 @@ class TestHeartbeatPacemaker(unittest.TestCase):
         
         # 运行测试
         async def run_test():
-            import miclaw.core.heartbeat as hb
+            import miclaw.core.scheduler.heartbeat as hb
             # 不应该抛出异常
             pass
         

@@ -9,7 +9,7 @@ import shutil
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from miclaw.core.skill_loader import load_dynamic_skills, get_skill_count, clear_skill_cache
+from miclaw.core.skills.loader import load_dynamic_skills, get_skill_count, clear_skill_cache
 
 
 def create_large_skills(test_dir: str, num_skills: int = 50):
@@ -126,8 +126,8 @@ def benchmark():
             
             # 重新加载配置
             import importlib
-            import miclaw.core.config as config_module
-            import miclaw.core.skill_loader as skill_loader_module
+            import miclaw.core.runtime.config as config_module
+            import miclaw.core.skills.loader as skill_loader_module
             importlib.reload(config_module)
             importlib.reload(skill_loader_module)
             

@@ -30,3 +30,4 @@ workspace/office
 .omx/
 .codegraph/daemon.pid
 docs/phase1_foundation_summary.md
+docs/

@@ -1,0 +1,36 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# config.py 从 core/ 移入 runtime/ 后，先回到原 core 层再沿用既有根目录推导。
+CORE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PACKAGE_DIR = os.path.dirname(CORE_DIR)
+PROJECT_ROOT = os.path.dirname(PACKAGE_DIR)
+
+WORKSPACE_DIR = os.getenv("MICLAW_WORKSPACE", os.path.join(PROJECT_ROOT, "workspace"))
+
+
+DB_PATH = os.path.join(WORKSPACE_DIR, "state.sqlite3")     # 状态机：潜意识与短期记忆
+EXECUTION_DB_PATH = os.path.join(WORKSPACE_DIR, "execution.sqlite3")  # Execution attempt 生命周期元数据
+MEMORY_DIR = os.path.join(WORKSPACE_DIR, "memory")         # 显性记忆：Markdown 画像
+PERSONAS_DIR = os.path.join(WORKSPACE_DIR, "personas")     # 人设区：系统 Prompt
+SCRIPTS_DIR = os.path.join(WORKSPACE_DIR, "scripts")       # 脚本区：自动化武器库
+OFFICE_DIR = os.path.join(WORKSPACE_DIR, "office")         # 沙盒工位 唯一被允许执行文件与shell操作的空间
+SKILLS_DIR = os.path.join(OFFICE_DIR, "skills")            # 技能卡槽
+TASKS_FILE = os.path.join(WORKSPACE_DIR, "tasks.json")
+
+
+def get_log_file_path(workspace: Path | str | None = None, log_file: Path | str | None = None) -> Path:
+    """解析 MiClaw JSONL log 文件路径。"""
+    if log_file is not None:
+        return Path(log_file).expanduser()
+
+    workspace_root = Path(workspace or WORKSPACE_DIR).expanduser()
+    return workspace_root / "logs" / "miclaw.jsonl"
+
+for d in [WORKSPACE_DIR, MEMORY_DIR, PERSONAS_DIR, SCRIPTS_DIR, OFFICE_DIR, SKILLS_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+print(f"🔧 [Config] Workspace 路径已就绪: {WORKSPACE_DIR}")

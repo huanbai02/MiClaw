@@ -5,15 +5,15 @@ import subprocess
 import pytest
 
 import entry.cli as cli
-import miclaw.core.mcp_permissions as mcp_permissions
-from miclaw.core.logger import (
+import miclaw.core.mcp.permissions as mcp_permissions
+from miclaw.core.observability.logger import (
     JSONLEventLogger,
     build_permission_confirmation_event,
     build_permission_decision_event,
 )
-from miclaw.core.mcp_adapter import MCPToolDescriptor
-from miclaw.core.mcp_permissions import authorize_mcp_tool, build_mcp_permission_request
-from miclaw.core.permissions import (
+from miclaw.core.mcp.adapter import MCPToolDescriptor
+from miclaw.core.mcp.permissions import authorize_mcp_tool, build_mcp_permission_request
+from miclaw.core.security.permissions import (
     PermissionCapability,
     PermissionConfirmationChoice,
     PermissionDecision,
@@ -25,7 +25,7 @@ from miclaw.core.permissions import (
     resolve_permission,
     set_session_permission_grants,
 )
-from miclaw.core.trace import TraceContext, reset_trace_context, set_current_trace_context
+from miclaw.core.observability.trace import TraceContext, reset_trace_context, set_current_trace_context
 
 
 def _descriptor(server_id="server-a", name="search", *, secret_description=False):

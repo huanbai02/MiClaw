@@ -8,8 +8,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import miclaw.core.tools.sandbox_tools as sandbox_tools
-from miclaw.core.permissions import (
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.security.permissions import (
     PermissionDecision,
     RiskLevel,
     allow,
@@ -19,7 +19,7 @@ from miclaw.core.permissions import (
     reset_permission_confirmation_handler,
     set_permission_confirmation_handler,
 )
-from miclaw.core.tools.sandbox_tools import (
+from miclaw.core.tools.sandbox import (
     _get_safe_path,
     _resolve_existing_office_path,
     _resolve_new_office_path,
@@ -349,7 +349,7 @@ def test_shell_rejects_office_with_symlink_escape(office, tmp_path):
     assert "Path is outside the office workspace" in result
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_is_blocked_by_default_ask_policy(mock_subprocess, office):
     result = execute_office_shell.invoke({"command": "ls"})
 
@@ -357,7 +357,7 @@ def test_execute_office_shell_is_blocked_by_default_ask_policy(mock_subprocess, 
     mock_subprocess.assert_not_called()
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_safe_command_uses_resolved_office_cwd_when_allowed(mock_subprocess, office, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
     mock_result = mock_subprocess.return_value
@@ -374,7 +374,7 @@ def test_execute_office_shell_safe_command_uses_resolved_office_cwd_when_allowed
     assert mock_subprocess.call_args.kwargs["timeout"] == sandbox_tools.SHELL_TIMEOUT_SECONDS
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_deny_policy_does_not_run(mock_subprocess, office, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", deny_all_permissions)
 
@@ -384,7 +384,7 @@ def test_execute_office_shell_deny_policy_does_not_run(mock_subprocess, office, 
     mock_subprocess.assert_not_called()
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_ask_with_denied_confirmation_does_not_run(
     mock_subprocess,
     office,
@@ -400,7 +400,7 @@ def test_execute_office_shell_ask_with_denied_confirmation_does_not_run(
     mock_subprocess.assert_not_called()
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_ask_with_allowed_confirmation_runs_safe_command(
     mock_subprocess,
     office,
@@ -419,7 +419,7 @@ def test_execute_office_shell_ask_with_allowed_confirmation_runs_safe_command(
     mock_subprocess.assert_called_once()
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_critical_shell_command_stays_blocked_after_allowed_confirmation(
     mock_subprocess,
     office,
@@ -458,7 +458,7 @@ def test_critical_shell_command_stays_blocked_after_allowed_confirmation(
         "chmod -R 777 .",
     ],
 )
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_shell_safety_blocks_unsafe_commands_even_when_allowed(mock_subprocess, office, monkeypatch, command):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
 
@@ -468,7 +468,7 @@ def test_shell_safety_blocks_unsafe_commands_even_when_allowed(mock_subprocess, 
     mock_subprocess.assert_not_called()
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_timeout_returns_timeout_message(mock_subprocess, office, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
     mock_subprocess.side_effect = subprocess.TimeoutExpired(cmd="sleep 99", timeout=sandbox_tools.SHELL_TIMEOUT_SECONDS)
@@ -479,7 +479,7 @@ def test_execute_office_shell_timeout_returns_timeout_message(mock_subprocess, o
     assert f"{sandbox_tools.SHELL_TIMEOUT_SECONDS}s" in result
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_long_stdout_is_truncated(mock_subprocess, office, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
     mock_result = mock_subprocess.return_value
@@ -494,7 +494,7 @@ def test_execute_office_shell_long_stdout_is_truncated(mock_subprocess, office, 
     assert "x" * (sandbox_tools.SHELL_OUTPUT_LIMIT + 1) not in result
 
 
-@patch("miclaw.core.tools.sandbox_tools.subprocess.run")
+@patch("miclaw.core.tools.sandbox.subprocess.run")
 def test_execute_office_shell_long_stderr_is_truncated(mock_subprocess, office, monkeypatch):
     monkeypatch.setattr(sandbox_tools, "_permission_evaluator", allow_all_permissions)
     mock_result = mock_subprocess.return_value

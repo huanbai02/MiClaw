@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from miclaw.core.mcp_adapter import (
+from miclaw.core.mcp.adapter import (
     MAX_DESCRIPTION_LENGTH,
     MCPAdapterError,
     MCPToolDescriptor,
