@@ -284,6 +284,10 @@ def run_agent(
         Optional[str],
         typer.Option(help="显式指定当前 run 使用的现有 PROJECT workspace directory。"),
     ] = None,
+    mcp_config: Annotated[
+        Optional[str],
+        typer.Option("--mcp-config", help="指定 host 控制的本地 MCP stdio JSON 配置文件。"),
+    ] = None,
 ):
     load_dotenv(ENV_PATH)
     provider = os.getenv("DEFAULT_PROVIDER")
@@ -315,7 +319,10 @@ def run_agent(
     try:
         import entry.main as miclaw_main
 
-        miclaw_main.main()
+        if mcp_config is None:
+            miclaw_main.main()
+        else:
+            miclaw_main.main(mcp_config_path=mcp_config)
     finally:
         reset_permission_confirmation_handler(confirmation_token)
         reset_session_permission_grants(grants_token)

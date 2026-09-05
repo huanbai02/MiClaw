@@ -80,8 +80,7 @@ def create_agent_app(
     checkpointer = None
 ):
     if tools is None:
-        dynamic_tools = load_dynamic_skills()
-        actual_tools = BUILTIN_TOOLS + dynamic_tools
+        actual_tools = default_agent_tools()
     else:
         actual_tools = tools
 
@@ -228,3 +227,8 @@ def create_agent_app(
     app = workflow.compile(checkpointer=checkpointer)
 
     return app
+
+
+def default_agent_tools() -> list[BaseTool]:
+    """返回默认运行时的内置与动态 Skill Tool 集。"""
+    return BUILTIN_TOOLS + load_dynamic_skills()

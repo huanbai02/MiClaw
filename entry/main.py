@@ -14,8 +14,11 @@ from prompt_toolkit.application import get_app
 
 from miclaw.core.agent.execution import apply_graph_recursion_limit, run_agent_execution
 from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
-from miclaw.core.agent.graph import create_agent_app
+from miclaw.core.agent.graph import create_agent_app, default_agent_tools
 from miclaw.core.agent.request import AgentRequest
+from miclaw.core.mcp.client import MCPClientError
+from miclaw.core.mcp.runtime_config import MCPRuntimeConfigError, load_mcp_stdio_configs
+from miclaw.core.mcp.tools import MCPAgentToolRuntime, MCPToolRegistrationError
 from miclaw.core.memory.lifecycle import (
     MemoryWriteIntent,
     reset_memory_write_intent,
@@ -119,7 +122,7 @@ def _parse_user_request(user_input: str) -> AgentRequest | None:
     return AgentRequest(content=user_input)
 
 
-async def async_main(trace_context: TraceContext | None = None):
+async def async_main(trace_context: TraceContext | None = None, mcp_config_path: str | None = None):
     print_banner()
     
     from dotenv import load_dotenv
@@ -129,9 +132,32 @@ async def async_main(trace_context: TraceContext | None = None):
     current_provider = os.getenv("DEFAULT_PROVIDER", "aliyun")
     current_model = os.getenv("DEFAULT_MODEL", "glm-5")
 
+    try:
+        mcp_configs = load_mcp_stdio_configs(mcp_config_path)
+    except MCPRuntimeConfigError:
+        raise RuntimeError("invalid_mcp_config") from None
+
     async with AsyncSqliteSaver.from_conn_string(DB_PATH) as memory:
         execution_store = ExecutionStore(EXECUTION_DB_PATH)
-        app = create_agent_app(provider_name=current_provider, model_name=current_model, checkpointer=memory)
+        mcp_runtime = MCPAgentToolRuntime(mcp_configs, local_tools=default_agent_tools())
+        try:
+            await mcp_runtime.__aenter__()
+        except (MCPClientError, MCPToolRegistrationError, ValueError):
+            execution_store.close()
+            raise RuntimeError("mcp_runtime_start_failed") from None
+        try:
+            app = create_agent_app(
+                provider_name=current_provider,
+                model_name=current_model,
+                tools=mcp_runtime.tools,
+                checkpointer=memory,
+            )
+        except BaseException as exc:
+            try:
+                await mcp_runtime.__aexit__(type(exc), exc, exc.__traceback__)
+            finally:
+                execution_store.close()
+            raise
         config = {"configurable": {"thread_id": "local_geek_master"}}
         if trace_context is not None:
             config["configurable"]["run_id"] = trace_context.run_id
@@ -366,12 +392,16 @@ async def async_main(trace_context: TraceContext | None = None):
                 return_exceptions=True,
             )
             execution_store.close()
+            try:
+                await mcp_runtime.__aexit__(None, None, None)
+            except MCPClientError:
+                raise RuntimeError("mcp_runtime_shutdown_failed") from None
 
-def main():
+def main(mcp_config_path: str | None = None):
     trace_context = TraceContext(run_id=new_run_id())
     trace_token = set_current_trace_context(trace_context)
     try:
-        asyncio.run(async_main(trace_context=trace_context))
+        asyncio.run(async_main(trace_context=trace_context, mcp_config_path=mcp_config_path))
     finally:
         reset_trace_context(trace_token)
 

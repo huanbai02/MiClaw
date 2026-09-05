@@ -86,6 +86,30 @@ miclaw run --workspace /path/to/existing/project
 
 该 PROJECT root 仅在本次运行内有效，不会持久化；未提供时仍使用默认 `workspace/office/`。PROJECT 内的 low-risk 文件读取和列举默认允许，文件写入和 shell 执行仍需 confirmation 或匹配的 session grant。
 
+### MCP stdio
+
+可通过 host 提供的本地 JSON 配置在启动时注册 MCP stdio Tool：
+
+```json
+{
+  "servers": [
+    {
+      "id": "local_demo",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["/path/to/server.py"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+```bash
+miclaw run --mcp-config /path/to/mcp.json
+```
+
+配置由本地 host 控制；模型只能选择已发现的 Tool，不能控制 executable、args、env、cwd 或 server 生命周期。MCP Tool 每次调用仍需 MiClaw permission confirmation。当前仅支持 stdio；修改配置后需重启运行时。
+
 查看运行日志监控面板：
 
 ```bash
