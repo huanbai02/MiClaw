@@ -15,6 +15,12 @@ from prompt_toolkit.application import get_app
 from miclaw.core.agent.execution import apply_graph_recursion_limit, run_agent_execution
 from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
 from miclaw.core.agent.graph import create_agent_app
+from miclaw.core.agent.request import AgentRequest
+from miclaw.core.memory.lifecycle import (
+    MemoryWriteIntent,
+    reset_memory_write_intent,
+    set_memory_write_intent,
+)
 from miclaw.core.runtime.config import DB_PATH, EXECUTION_DB_PATH
 from miclaw.core.runtime.execution_store import ExecutionStore
 from miclaw.core.scheduler.heartbeat import pacemaker_loop
@@ -95,6 +101,24 @@ def _observe_critical_task(task: asyncio.Task, failure_signal: asyncio.Future, f
         failure_signal.set_result(failure_code)
 
 
+def _parse_user_request(user_input: str) -> AgentRequest | None:
+    """只在交互输入边界解析 /remember 并建立可信 turn metadata。"""
+    if user_input == "/remember" or (
+        user_input.startswith("/remember")
+        and len(user_input) > len("/remember")
+        and user_input[len("/remember")].isspace()
+    ):
+        content = user_input[len("/remember"):].strip()
+        if not content:
+            cprint("Usage: /remember <content>")
+            return None
+        return AgentRequest(
+            content=f"请记住以下信息：{content}",
+            memory_write_intent=MemoryWriteIntent.EXPLICIT_USER_REQUEST,
+        )
+    return AgentRequest(content=user_input)
+
+
 async def async_main(trace_context: TraceContext | None = None):
     print_banner()
     
@@ -161,80 +185,87 @@ async def async_main(trace_context: TraceContext | None = None):
 
         async def agent_worker(current_task_queue):
             while True:
-                user_input = await current_task_queue.get()
-                if user_input.lower() in ["/exit", "/quit"]:
+                request = await current_task_queue.get()
+                if not isinstance(request, AgentRequest):
+                    current_task_queue.task_done()
+                    raise RuntimeError("invalid_agent_request")
+                if request.content.lower() in ["/exit", "/quit"]:
                     current_task_queue.task_done()
                     break
-                
-                spinner.current_words = spinner.action_words.copy()
-                random.shuffle(spinner.current_words)
-                
-                spinner.start_time = time.time()
-                spinner.is_spinning = True
-                spinner.is_tool_calling = False
-                
-                inputs = {"messages": [HumanMessage(content=user_input)]}
-                checkpoint_thread_id = config["configurable"]["thread_id"]
-                checkpoint_run_id = new_checkpoint_run_id()
-                invocation_config = apply_checkpoint_correlation(config, checkpoint_run_id)
 
-                async def invoke_graph_once():
-                    async for event in app.astream(
-                        inputs,
-                        config=invocation_config,
-                        stream_mode="updates",
-                        durability="sync",
-                    ):
-                        for node_name, node_data in event.items():
-                            if node_name == "agent":
-                                last_msg = node_data["messages"][-1]
-                                
-                                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                                    for tc in last_msg.tool_calls:
-                                        spinner.is_tool_calling = True
-                                        spinner.tool_msg = f"唤醒内置工具 : {tc['name']}..."
-                                        cprint(f"  ●\033[38;5;51m Tool Call: \033[0m{tc['name']}")
-                                        cprint('')
-                                        
-                                elif last_msg.content:
-                                    spinner.is_spinning = False
-                                    
-                                    lines = last_msg.content.strip().split('\n')
-                                    if lines:
-                                        formatted_out = f"  \033[38;5;141m❯\033[0m \033[38;5;250m{lines[0]}"
-                                        for line in lines[1:]:
-                                            formatted_out += f"\n    {line}"
-                                        formatted_out += "\033[0m" 
-                                        cprint(formatted_out)
-                                    
-                            elif node_name != "agent": 
-                                spinner.is_tool_calling = False 
-                                
+                intent_token = None
+                if request.memory_write_intent is not None:
+                    intent_token = set_memory_write_intent(request.memory_write_intent)
+                try:
+                    spinner.current_words = spinner.action_words.copy()
+                    random.shuffle(spinner.current_words)
 
-                async def checkpoint_id_provider():
-                    checkpoint_ref, _ = await latest_owned_checkpoint(
-                        app,
-                        checkpoint_thread_id,
-                        checkpoint_run_id,
+                    spinner.start_time = time.time()
+                    spinner.is_spinning = True
+                    spinner.is_tool_calling = False
+
+                    inputs = {"messages": [HumanMessage(content=request.content)]}
+                    checkpoint_thread_id = config["configurable"]["thread_id"]
+                    checkpoint_run_id = new_checkpoint_run_id()
+                    invocation_config = apply_checkpoint_correlation(config, checkpoint_run_id)
+
+                    async def invoke_graph_once():
+                        async for event in app.astream(
+                            inputs,
+                            config=invocation_config,
+                            stream_mode="updates",
+                            durability="sync",
+                        ):
+                            for node_name, node_data in event.items():
+                                if node_name == "agent":
+                                    last_msg = node_data["messages"][-1]
+
+                                    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                                        for tc in last_msg.tool_calls:
+                                            spinner.is_tool_calling = True
+                                            spinner.tool_msg = f"唤醒内置工具 : {tc['name']}..."
+                                            cprint(f"  ●\033[38;5;51m Tool Call: \033[0m{tc['name']}")
+                                            cprint('')
+
+                                    elif last_msg.content:
+                                        spinner.is_spinning = False
+
+                                        lines = last_msg.content.strip().split('\n')
+                                        if lines:
+                                            formatted_out = f"  \033[38;5;141m❯\033[0m \033[38;5;250m{lines[0]}"
+                                            for line in lines[1:]:
+                                                formatted_out += f"\n    {line}"
+                                            formatted_out += "\033[0m"
+                                            cprint(formatted_out)
+
+                                elif node_name != "agent":
+                                    spinner.is_tool_calling = False
+
+                    async def checkpoint_id_provider():
+                        checkpoint_ref, _ = await latest_owned_checkpoint(
+                            app,
+                            checkpoint_thread_id,
+                            checkpoint_run_id,
+                        )
+                        return checkpoint_ref.checkpoint_id if checkpoint_ref is not None else None
+
+                    execution = await run_agent_execution(
+                        invoke_graph_once,
+                        trace_context=trace_context,
+                        execution_store=execution_store,
+                        checkpoint_thread_id=checkpoint_thread_id,
+                        checkpoint_run_id=checkpoint_run_id,
+                        checkpoint_id_provider=checkpoint_id_provider,
                     )
-                    return checkpoint_ref.checkpoint_id if checkpoint_ref is not None else None
-
-                execution = await run_agent_execution(
-                    invoke_graph_once,
-                    trace_context=trace_context,
-                    execution_store=execution_store,
-                    checkpoint_thread_id=checkpoint_thread_id,
-                    checkpoint_run_id=checkpoint_run_id,
-                    checkpoint_id_provider=checkpoint_id_provider,
-                )
-                if execution.failure is not None:
+                    if execution.failure is not None:
+                        spinner.is_spinning = False
+                        cprint(f"  \033[31m[ ⚠️ 引擎执行失败 : {execution.failure.code.value} ]\033[0m")
+                finally:
+                    if intent_token is not None:
+                        reset_memory_write_intent(intent_token)
                     spinner.is_spinning = False
-                    cprint(f"  \033[31m[ ⚠️ 引擎执行失败 : {execution.failure.code.value} ]\033[0m")
-
-
-                spinner.is_spinning = False
-                cprint() # 空出舒适的行距
-                current_task_queue.task_done()
+                    cprint() # 空出舒适的行距
+                    current_task_queue.task_done()
 
         async def user_input_loop(current_task_queue):
             custom_style = Style.from_dict({
@@ -269,17 +300,20 @@ async def async_main(trace_context: TraceContext | None = None):
                             continue
                     
 
+                        request = _parse_user_request(user_input)
+                        if request is None:
+                            continue
                         padded_bubble = f"  ❯ {user_input}    "
                         cprint(f"\033[48;2;38;38;38m\033[38;5;255m{padded_bubble}\033[0m\n")
                     
-                        await current_task_queue.put(user_input)
+                        await current_task_queue.put(request)
                         if user_input.lower() in ["/exit", "/quit"]:
                             cprint("  \033[38;5;141m✦ 记忆已固化，MiClaw 进入休眠。\033[0m")
                             break
 
                     except (KeyboardInterrupt, EOFError):
                         cprint("\n  \033[38;5;141m✦ 强制中断，MiClaw 进入休眠。\033[0m")
-                        await current_task_queue.put("/exit")
+                        await current_task_queue.put(AgentRequest(content="/exit"))
                         break
             finally:
                 redraw_task.cancel()

@@ -8,6 +8,8 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock, MagicMock
 
+from miclaw.core.agent.request import AgentRequest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
@@ -293,7 +295,9 @@ class TestHeartbeatTaskQueue(unittest.TestCase):
             try:
                 message = await asyncio.wait_for(queue.get(), timeout=1)
                 queue.task_done()
-                self.assertIn("真实队列投递", message)
+                self.assertIsInstance(message, AgentRequest)
+                self.assertIn("真实队列投递", message.content)
+                self.assertIsNone(message.memory_write_intent)
             finally:
                 heartbeat.TASKS_FILE = original_tasks_file
                 task.cancel()

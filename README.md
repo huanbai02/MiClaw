@@ -70,6 +70,14 @@ miclaw run
 
 运行期间遇到 `ASK` permission 时，CLI 只展示安全摘要，并支持单次允许、当前 session 允许或拒绝；默认值、无效输入或 prompt 异常都会阻断操作。Session grant 仅保存在当前进程内存中，退出本次运行后自动清除。
 
+需要明确保存长期画像时，使用：
+
+```text
+/remember <content>
+```
+
+该命令只为当前 turn 建立可信的写入 eligibility；实际 `MEMORY_WRITE` 仍会经过 permission confirmation。MiClaw 不会从任意自然语言自动提取并持久化记忆。
+
 如需把当前 run 显式限制在一个现有项目目录，可使用：
 
 ```bash
@@ -126,7 +134,7 @@ miclaw skills lint --help
 - 模型提供商配置：通过配置向导保存默认 Provider、模型名、API Key 和兼容 Base URL。
 - 对话智能体：基于 LangGraph 组织 Agent 循环、工具选择和上下文状态。
 - 沙盒工具：提供 office 目录内的文件列表、读取、写入和 Shell 执行能力。
-- 长期记忆：通过 Markdown 档案维护用户画像，支持在对话中主动更新。
+- 长期记忆：通过 Markdown 档案维护用户画像；使用 `/remember <content>` 显式请求更新，且仍需 permission confirmation。
 - 定时任务：后台心跳循环检查 `tasks.json`，到点后把任务投递给智能体处理。
 - 技能加载：从 `SKILL.md` 动态加载工具说明，支持懒加载和缓存刷新。
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
