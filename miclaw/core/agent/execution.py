@@ -25,6 +25,7 @@ from ..execution.recovery import ExecutionAttemptRecord
 from ..execution.retry import RetryDecision, RetryEvaluation, RetryPolicy, evaluate_retry
 from ..execution.state import (
     create_next_execution_attempt,
+    cancel_execution,
     create_pending_execution,
     mark_execution_failed,
     mark_execution_succeeded,
@@ -180,63 +181,65 @@ async def run_agent_execution(
 
     guard_token = _execution_guard_runtime.set(_ExecutionGuardRuntime(ExecutionGuardState(), ExecutionGuardPolicy()))
     try:
-        output = await invoke()
-    except asyncio.CancelledError:
-        raise
-    except GraphBubbleUp:
-        raise
-    except GraphRecursionError:
-        failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.EXECUTION_LIMIT_EXCEEDED)
-    except ExecutionGuardTriggered:
-        failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.LOOP_GUARD_TRIGGERED)
-    except AgentProviderFailure as exc:
-        failure = exc.failure
-    except Exception:
-        failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.RUNTIME_ERROR)
-    else:
-        succeeded = mark_execution_succeeded(running, finished_at=clock())
+        try:
+            output = await invoke()
+        except GraphBubbleUp:
+            raise
+        except GraphRecursionError:
+            failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.EXECUTION_LIMIT_EXCEEDED)
+        except ExecutionGuardTriggered:
+            failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.LOOP_GUARD_TRIGGERED)
+        except AgentProviderFailure as exc:
+            failure = exc.failure
+        except Exception:
+            failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.RUNTIME_ERROR)
+        else:
+            succeeded = mark_execution_succeeded(running, finished_at=clock())
+            if execution_store is not None:
+                _persist_transition(
+                    execution_store,
+                    _record(
+                        succeeded,
+                        checkpoint_thread_id,
+                        checkpoint_run_id,
+                        checkpoint_id=await _checkpoint_id(checkpoint_id_provider),
+                    ),
+                    ExecutionStatus.RUNNING,
+                )
+            _log_execution_finished(succeeded, checkpoint_thread_id, active_trace)
+            return AgentExecutionResult(output, succeeded, None, None, None)
+
+        failed = mark_execution_failed(running, finished_at=clock())
+        evaluation = evaluate_retry(failure, current_attempt=failed.attempt, policy=retry_policy)
+        next_attempt = create_next_execution_attempt(failed, evaluation) if evaluation.decision is RetryDecision.RETRY else None
         if execution_store is not None:
-            _persist_transition(
-                execution_store,
-                _record(
-                    succeeded,
-                    checkpoint_thread_id,
-                    checkpoint_run_id,
-                    checkpoint_id=await _checkpoint_id(checkpoint_id_provider),
-                ),
-                ExecutionStatus.RUNNING,
-            )
-        _log_execution_finished(succeeded, checkpoint_thread_id, active_trace)
-        return AgentExecutionResult(output, succeeded, None, None, None)
+            try:
+                execution_store.fail_and_plan_next(
+                    _record(
+                        failed,
+                        checkpoint_thread_id,
+                        checkpoint_run_id,
+                        checkpoint_id=await _checkpoint_id(checkpoint_id_provider),
+                        failure=failure,
+                        retry_evaluation=evaluation,
+                    ),
+                    ExecutionAttemptRecord(next_attempt) if next_attempt is not None else None,
+                )
+            except ExecutionStoreError:
+                raise AgentExecutionRuntimeError("execution_persistence_failed") from None
+        _log_execution_finished(
+            failed,
+            checkpoint_thread_id,
+            active_trace,
+            failure_code=failure.code.value,
+            retry_decision=evaluation.decision.value,
+        )
+        return AgentExecutionResult(None, failed, failure, evaluation, next_attempt)
+    except asyncio.CancelledError:
+        _persist_cancellation(execution_store, running, checkpoint_thread_id, checkpoint_run_id, active_trace, clock)
+        raise
     finally:
         _execution_guard_runtime.reset(guard_token)
-
-    failed = mark_execution_failed(running, finished_at=clock())
-    evaluation = evaluate_retry(failure, current_attempt=failed.attempt, policy=retry_policy)
-    next_attempt = create_next_execution_attempt(failed, evaluation) if evaluation.decision is RetryDecision.RETRY else None
-    if execution_store is not None:
-        try:
-            execution_store.fail_and_plan_next(
-                _record(
-                    failed,
-                    checkpoint_thread_id,
-                    checkpoint_run_id,
-                    checkpoint_id=await _checkpoint_id(checkpoint_id_provider),
-                    failure=failure,
-                    retry_evaluation=evaluation,
-                ),
-                ExecutionAttemptRecord(next_attempt) if next_attempt is not None else None,
-            )
-        except ExecutionStoreError:
-            raise AgentExecutionRuntimeError("execution_persistence_failed") from None
-    _log_execution_finished(
-        failed,
-        checkpoint_thread_id,
-        active_trace,
-        failure_code=failure.code.value,
-        retry_decision=evaluation.decision.value,
-    )
-    return AgentExecutionResult(None, failed, failure, evaluation, next_attempt)
 
 
 def _log_execution_started(
@@ -353,6 +356,33 @@ def _persist_transition(store: ExecutionStore, record: ExecutionAttemptRecord, e
         if str(exc) == "execution_record_conflict":
             raise AgentExecutionRuntimeError("execution_record_conflict") from None
         raise AgentExecutionRuntimeError("execution_persistence_failed") from None
+
+
+def _persist_cancellation(
+    store: ExecutionStore | None,
+    running: ExecutionState,
+    checkpoint_thread_id: str | None,
+    checkpoint_run_id: str | None,
+    trace_context: TraceContext,
+    clock: Callable[[], datetime],
+) -> None:
+    """在 cancellation control-flow 传播前尽力持久化 CANCELLED，失败只记录稳定 metadata。"""
+    cancelled = cancel_execution(running, finished_at=clock())
+    if store is not None:
+        try:
+            store.transition(
+                _record(cancelled, checkpoint_thread_id, checkpoint_run_id),
+                expected_status=ExecutionStatus.RUNNING,
+            )
+        except ExecutionStoreError:
+            audit_logger.log_event(
+                _safe_event_thread_id(checkpoint_thread_id),
+                "execution_cancel_persistence_failed",
+                trace_context=trace_context,
+                attempt=running.attempt,
+            )
+            return
+    _log_execution_finished(cancelled, checkpoint_thread_id, trace_context)
 
 
 async def _checkpoint_id(provider: Callable[[], Awaitable[str | None]] | None) -> str | None:

@@ -277,6 +277,289 @@ def test_async_main_processes_one_message_into_execution_store(runtime_main, mon
     assert rows == [("succeeded",)]
 
 
+def test_interactive_cancel_persists_active_execution_and_worker_handles_next_turn(runtime_main, monkeypatch, tmp_path):
+    """/cancel 经真实 input control boundary 取消 child task，持久化后 worker 仍可完成下一 turn。"""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    second_done = asyncio.Event()
+    rendered: list[str] = []
+
+    class _FakeApp:
+        async def astream(self, inputs, *, config, stream_mode, durability):
+            content = inputs["messages"][0].content
+            assert stream_mode == "updates" and durability == "sync"
+            if content == "long running":
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            else:
+                second_done.set()
+                yield {"agent": {"messages": [AIMessage(content="second complete")]}}
+
+        async def aget_state_history(self, _config):
+            if False:  # pragma: no cover
+                yield None
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "long running"
+            if self.step == 2:
+                await started.wait()
+                return "/cancel"
+            if self.step == 3:
+                return "/cancel"
+            if self.step == 4:
+                await cancelled.wait()
+                return "second turn"
+            await second_done.wait()
+            return "/exit"
+
+    async def fake_pacemaker_loop(_task_queue, check_interval: int = 10):
+        await asyncio.Event().wait()
+
+    execution_db = tmp_path / "execution.sqlite3"
+    monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+    monkeypatch.setattr(runtime_main, "cprint", lambda *args, **_kwargs: rendered.append(str(args[0]) if args else ""))
+    monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+    monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+    monkeypatch.setattr(runtime_main, "create_agent_app", lambda **_kwargs: _FakeApp())
+    monkeypatch.setattr(runtime_main, "DB_PATH", str(tmp_path / "state.sqlite3"))
+    monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+    asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="interactive-cancel-run")))
+
+    with sqlite3.connect(execution_db) as connection:
+        rows = connection.execute("SELECT status FROM execution_attempts ORDER BY created_at").fetchall()
+    assert rows == [("cancelled",), ("succeeded",)]
+    assert "Cancellation requested." in rendered
+    assert "Cancellation already requested." in rendered
+    assert any("Execution cancelled." in line for line in rendered)
+
+
+def test_interactive_cancel_when_idle_does_not_mutate_execution_store(runtime_main, monkeypatch, tmp_path):
+    """idle /cancel 只给稳定反馈，不投递模型请求或改变 Store。"""
+    rendered: list[str] = []
+    prompts = iter(("/cancel", "/exit"))
+
+    class _FakeApp:
+        async def astream(self, *_args, **_kwargs):
+            raise AssertionError("idle cancel must not invoke graph")
+            yield  # pragma: no cover
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            return next(prompts)
+
+    async def fake_pacemaker_loop(_task_queue, check_interval: int = 10):
+        await asyncio.Event().wait()
+
+    execution_db = tmp_path / "execution.sqlite3"
+    monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+    monkeypatch.setattr(runtime_main, "cprint", lambda *args, **_kwargs: rendered.append(str(args[0]) if args else ""))
+    monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+    monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+    monkeypatch.setattr(runtime_main, "create_agent_app", lambda **_kwargs: _FakeApp())
+    monkeypatch.setattr(runtime_main, "DB_PATH", str(tmp_path / "state.sqlite3"))
+    monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+    asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="idle-cancel-run")))
+
+    assert rendered[0] == "No active execution."
+    with sqlite3.connect(execution_db) as connection:
+        assert connection.execute("SELECT status FROM execution_attempts").fetchall() == []
+
+
+def test_cancel_text_is_not_privileged_outside_interactive_input_boundary(runtime_main):
+    """scheduler/MCP 等 producer 的普通 AgentRequest content 不能伪造 host /cancel control。"""
+    assert runtime_main._parse_user_request("/cancel") == AgentRequest(content="/cancel")
+
+
+def test_exit_cancels_active_execution_before_worker_shutdown(runtime_main, monkeypatch, tmp_path):
+    """/exit 在 active execution 中先取消 child task，避免 shutdown 留下 RUNNING attempt。"""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _FakeApp:
+        async def astream(self, _inputs, *, config, stream_mode, durability):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            yield  # pragma: no cover
+
+        async def aget_state_history(self, _config):
+            if False:  # pragma: no cover
+                yield None
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "long running"
+            await started.wait()
+            return "/exit"
+
+    async def fake_pacemaker_loop(_task_queue, check_interval: int = 10):
+        await asyncio.Event().wait()
+
+    execution_db = tmp_path / "execution.sqlite3"
+    monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+    monkeypatch.setattr(runtime_main, "cprint", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+    monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+    monkeypatch.setattr(runtime_main, "create_agent_app", lambda **_kwargs: _FakeApp())
+    monkeypatch.setattr(runtime_main, "DB_PATH", str(tmp_path / "state.sqlite3"))
+    monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+    asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="exit-cancel-run")))
+
+    assert cancelled.is_set()
+    with sqlite3.connect(execution_db) as connection:
+        assert connection.execute("SELECT status FROM execution_attempts").fetchall() == [("cancelled",)]
+
+
+@pytest.mark.parametrize("explicit_user_cancel", (False, True), ids=("runtime_shutdown", "user_cancel_then_shutdown"))
+def test_active_execution_shutdown_does_not_swallow_worker_cancellation(
+    runtime_main,
+    monkeypatch,
+    tmp_path,
+    explicit_user_cancel,
+):
+    """worker 自身被取消时优先退出，即使 child 已有 /cancel 标记。"""
+    started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    rendered: list[str] = []
+
+    class _FakeApp:
+        async def astream(self, _inputs, *, config, stream_mode, durability):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                child_cancelled.set()
+                if explicit_user_cancel:
+                    # 等待 runtime shutdown 的第二次取消，锁定原先 worker 吞取消的竞态。
+                    await asyncio.Event().wait()
+                raise
+            yield  # pragma: no cover
+
+        async def aget_state_history(self, _config):
+            if False:  # pragma: no cover
+                yield None
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "long running"
+            await started.wait()
+            if explicit_user_cancel and self.step == 2:
+                return "/cancel"
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")  # pragma: no cover
+
+    async def fake_pacemaker_loop(_task_queue, check_interval: int = 10):
+        await (child_cancelled if explicit_user_cancel else started).wait()
+        raise RuntimeError("SENSITIVE_HEARTBEAT_DETAIL")
+
+    execution_db = tmp_path / "execution.sqlite3"
+    monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+    monkeypatch.setattr(runtime_main, "cprint", lambda *args, **_kwargs: rendered.append(str(args[0]) if args else ""))
+    monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+    monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+    monkeypatch.setattr(runtime_main, "create_agent_app", lambda **_kwargs: _FakeApp())
+    monkeypatch.setattr(runtime_main, "DB_PATH", str(tmp_path / "state.sqlite3"))
+    monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+    async def run_runtime() -> None:
+        with pytest.raises(RuntimeError, match="scheduler_heartbeat_failed") as error:
+            await asyncio.wait_for(
+                runtime_main.async_main(trace_context=TraceContext(run_id="active-shutdown-race-run")),
+                timeout=1,
+            )
+        assert "SENSITIVE_HEARTBEAT_DETAIL" not in str(error.value)
+
+    asyncio.run(run_runtime())
+
+    assert child_cancelled.is_set()
+    with sqlite3.connect(execution_db) as connection:
+        assert connection.execute("SELECT status FROM execution_attempts").fetchall() == [("cancelled",)]
+    assert not any("agent_worker_failed" in line for line in rendered)
+
+
+def test_eof_cancels_active_execution_before_worker_shutdown(runtime_main, monkeypatch, tmp_path):
+    """EOF 与 /exit 共享受控 child cancellation，不留下 RUNNING attempt。"""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _FakeApp:
+        async def astream(self, _inputs, *, config, stream_mode, durability):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            yield  # pragma: no cover
+
+        async def aget_state_history(self, _config):
+            if False:  # pragma: no cover
+                yield None
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "long running"
+            await started.wait()
+            raise EOFError
+
+    async def fake_pacemaker_loop(_task_queue, check_interval: int = 10):
+        await asyncio.Event().wait()
+
+    execution_db = tmp_path / "execution.sqlite3"
+    monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+    monkeypatch.setattr(runtime_main, "cprint", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+    monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+    monkeypatch.setattr(runtime_main, "create_agent_app", lambda **_kwargs: _FakeApp())
+    monkeypatch.setattr(runtime_main, "DB_PATH", str(tmp_path / "state.sqlite3"))
+    monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+    asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="eof-cancel-run")))
+
+    assert cancelled.is_set()
+    with sqlite3.connect(execution_db) as connection:
+        assert connection.execute("SELECT status FROM execution_attempts").fetchall() == [("cancelled",)]
+
+
 class _SequenceModel:
     """为真实 graph/ToolNode 提供可控的同步模型响应。"""
 

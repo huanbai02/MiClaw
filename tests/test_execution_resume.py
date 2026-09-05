@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from miclaw.core.agent.execution import AgentExecutionRuntimeError, AgentProviderFailure
 from miclaw.core.agent.recovery import resume_pending_execution
 from miclaw.core.execution.failures import ExecutionFailure, ExecutionFailureCode, ExecutionFailureSource
@@ -199,6 +201,45 @@ def test_resumed_timeout_plans_next_attempt_and_respects_total_attempt_limit(tmp
             raise AssertionError("max_attempts must not create attempt 4")
         except Exception as exc:
             assert str(exc) == "execution_record_not_found"
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_resumed_pending_attempt_persists_cancelled_without_attempt_three(tmp_path):
+    """PR57 continuation 已 RUNNING 时取消，仍走 wrapper durable CANCELLED bridge。"""
+    async def scenario():
+        store = ExecutionStore(tmp_path / "execution.sqlite3")
+        _plan_retry(store, "execution-resume-cancel")
+        graph = _CheckpointGraph("predecessor-run", ("agent",))
+        started = asyncio.Event()
+
+        async def blocked_ainvoke(_input, *, config, durability):
+            graph.invocations += 1
+            assert durability == "sync"
+            started.set()
+            await asyncio.Event().wait()
+
+        graph.ainvoke = blocked_ainvoke
+        task = asyncio.create_task(
+            resume_pending_execution(
+                store,
+                graph,
+                "execution-resume-cancel",
+                2,
+                config={"configurable": {"thread_id": "resume-thread"}},
+                trace_context=TraceContext(run_id="resume-cancel-trace"),
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert graph.invocations == 1
+        assert store.get_attempt("execution-resume-cancel", 2).state.status is ExecutionStatus.CANCELLED
+        with pytest.raises(Exception, match="execution_record_not_found"):
+            store.get_attempt("execution-resume-cancel", 3)
         store.close()
 
     asyncio.run(scenario())

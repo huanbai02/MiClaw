@@ -36,6 +36,7 @@ from miclaw.core.observability.trace import (
     reset_trace_context,
     set_current_trace_context,
 )
+from miclaw.core.runtime.execution_store import ExecutionStore, ExecutionStoreError
 from miclaw.core.tools.result import tool_error
 
 
@@ -233,6 +234,159 @@ def test_cancellation_propagates_without_failure_or_retry_planning():
 
     with pytest.raises(asyncio.CancelledError):
         _run(invoke)
+
+
+def test_cancellation_persists_running_attempt_without_retry_or_replay(tmp_path):
+    """已 RUNNING 的 await 被取消时 durable 状态变 CANCELLED，且 wrapper 继续传播 control flow。"""
+    async def scenario():
+        store = ExecutionStore(tmp_path / "execution.sqlite3")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def invoke():
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+
+        task = asyncio.create_task(
+            run_agent_execution(
+                invoke,
+                execution_id="execution-cancelled",
+                trace_context=TraceContext(run_id="cancel-trace"),
+                execution_store=store,
+                checkpoint_thread_id="cancel-thread",
+                checkpoint_run_id="cancel-run",
+                clock=FixedClock(START, FINISH),
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        record = store.get_attempt("execution-cancelled", 1)
+        assert calls == 1
+        assert record.state.status is ExecutionStatus.CANCELLED
+        assert record.failure is record.retry_evaluation is None
+        with pytest.raises(ExecutionStoreError, match="execution_record_not_found"):
+            store.get_attempt("execution-cancelled", 2)
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_before_task_starts_creates_no_phantom_execution_record(tmp_path):
+    """child Task 尚未进入 wrapper 时被取消，不伪造 PENDING/RUNNING durable attempt。"""
+    async def scenario():
+        store = ExecutionStore(tmp_path / "execution.sqlite3")
+
+        async def invoke():
+            raise AssertionError("cancelled task must not invoke graph")
+
+        task = asyncio.create_task(
+            run_agent_execution(
+                invoke,
+                execution_id="execution-never-started",
+                trace_context=TraceContext(run_id="early-cancel-trace"),
+                execution_store=store,
+                checkpoint_thread_id="cancel-thread",
+                checkpoint_run_id="cancel-run",
+            )
+        )
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(ExecutionStoreError, match="execution_record_not_found"):
+            store.get_attempt("execution-never-started", 1)
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_terminal_completion_and_cancel_race_keeps_one_legal_terminal_state(tmp_path):
+    """success/cancel 边界竞争时由 CAS 决定唯一 terminal，不能重开或计划 retry。"""
+    async def scenario():
+        store = ExecutionStore(tmp_path / "execution.sqlite3")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def invoke():
+            started.set()
+            await release.wait()
+            return "done"
+
+        task = asyncio.create_task(
+            run_agent_execution(
+                invoke,
+                execution_id="execution-terminal-race",
+                trace_context=TraceContext(run_id="terminal-race-trace"),
+                execution_store=store,
+                checkpoint_thread_id="cancel-thread",
+                checkpoint_run_id="cancel-run",
+            )
+        )
+        await started.wait()
+        release.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        record = store.get_attempt("execution-terminal-race", 1)
+        assert record.state.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED}
+        with pytest.raises(ExecutionStoreError, match="execution_record_not_found"):
+            store.get_attempt("execution-terminal-race", 2)
+        store.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_persistence_failure_never_replays_or_plans_retry(tmp_path, monkeypatch):
+    """CANCELLED CAS 写入失败仍 re-raise cancellation，保留可恢复 RUNNING 而不执行任何 retry。"""
+    async def scenario():
+        store = ExecutionStore(tmp_path / "execution.sqlite3")
+        started = asyncio.Event()
+        calls = 0
+
+        async def invoke():
+            nonlocal calls
+            calls += 1
+            started.set()
+            await asyncio.Event().wait()
+
+        original_transition = store.transition
+
+        def fail_cancel(record, *, expected_status):
+            if record.state.status is ExecutionStatus.CANCELLED:
+                raise ExecutionStoreError("execution_store_error")
+            return original_transition(record, expected_status=expected_status)
+
+        monkeypatch.setattr(store, "transition", fail_cancel)
+        task = asyncio.create_task(
+            run_agent_execution(
+                invoke,
+                execution_id="execution-cancel-persist-failure",
+                trace_context=TraceContext(run_id="cancel-failure-trace"),
+                execution_store=store,
+                checkpoint_thread_id="cancel-thread",
+                checkpoint_run_id="cancel-run",
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == 1
+        assert store.get_attempt("execution-cancel-persist-failure", 1).state.status is ExecutionStatus.RUNNING
+        with pytest.raises(ExecutionStoreError, match="execution_record_not_found"):
+            store.get_attempt("execution-cancel-persist-failure", 2)
+        store.close()
+
+    asyncio.run(scenario())
 
 
 def test_langgraph_interrupt_control_flow_propagates_without_failure_or_retry_planning():

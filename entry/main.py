@@ -12,7 +12,8 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles import Style
 from prompt_toolkit.application import get_app
 
-from miclaw.core.agent.execution import apply_graph_recursion_limit, run_agent_execution
+from miclaw.core.agent.active_execution import ActiveExecutionController
+from miclaw.core.agent.execution import apply_graph_recursion_limit, new_execution_id, run_agent_execution
 from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
 from miclaw.core.agent.graph import create_agent_app, default_agent_tools
 from miclaw.core.agent.request import AgentRequest
@@ -163,6 +164,7 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
             config["configurable"]["run_id"] = trace_context.run_id
         config = apply_graph_recursion_limit(config)
         runtime_task_queue = asyncio.Queue()
+        active_execution = ActiveExecutionController()
 
         class SpinnerState:
             action_words = [
@@ -209,7 +211,7 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
         prompt_message = ANSI("  \033[38;5;51m❯\033[0m ")
         placeholder_text = ANSI("\033[3m\033[38;5;242minput...\033[0m")
 
-        async def agent_worker(current_task_queue):
+        async def agent_worker(current_task_queue, controller: ActiveExecutionController):
             while True:
                 request = await current_task_queue.get()
                 if not isinstance(request, AgentRequest):
@@ -275,14 +277,31 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                         )
                         return checkpoint_ref.checkpoint_id if checkpoint_ref is not None else None
 
-                    execution = await run_agent_execution(
-                        invoke_graph_once,
-                        trace_context=trace_context,
-                        execution_store=execution_store,
-                        checkpoint_thread_id=checkpoint_thread_id,
-                        checkpoint_run_id=checkpoint_run_id,
-                        checkpoint_id_provider=checkpoint_id_provider,
+                    execution_id = new_execution_id()
+                    execution_task = asyncio.create_task(
+                        run_agent_execution(
+                            invoke_graph_once,
+                            execution_id=execution_id,
+                            trace_context=trace_context,
+                            execution_store=execution_store,
+                            checkpoint_thread_id=checkpoint_thread_id,
+                            checkpoint_run_id=checkpoint_run_id,
+                            checkpoint_id_provider=checkpoint_id_provider,
+                        )
                     )
+                    controller.register(execution_task, execution_id, 1)
+                    try:
+                        execution = await execution_task
+                    except asyncio.CancelledError:
+                        worker_task = asyncio.current_task()
+                        if worker_task is not None and worker_task.cancelling() > 0:
+                            raise
+                        if not controller.cancellation_requested_for(execution_task):
+                            raise
+                        cprint("  \033[33m[ Execution cancelled. ]\033[0m")
+                        continue
+                    finally:
+                        controller.clear_if_current(execution_task)
                     if execution.failure is not None:
                         spinner.is_spinning = False
                         cprint(f"  \033[31m[ ⚠️ 引擎执行失败 : {execution.failure.code.value} ]\033[0m")
@@ -293,7 +312,7 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                     cprint() # 空出舒适的行距
                     current_task_queue.task_done()
 
-        async def user_input_loop(current_task_queue):
+        async def user_input_loop(current_task_queue, controller: ActiveExecutionController):
             custom_style = Style.from_dict({
                 'bottom-toolbar': 'bg:default fg:default noreverse',
             })
@@ -324,6 +343,16 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                         user_input = user_input.strip()
                         if not user_input:
                             continue
+
+                        if user_input == "/cancel":
+                            outcome = controller.cancel_active()
+                            if outcome == "cancellation_requested":
+                                cprint("Cancellation requested.")
+                            elif outcome == "cancellation_already_requested":
+                                cprint("Cancellation already requested.")
+                            else:
+                                cprint("No active execution.")
+                            continue
                     
 
                         request = _parse_user_request(user_input)
@@ -334,11 +363,13 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                     
                         await current_task_queue.put(request)
                         if user_input.lower() in ["/exit", "/quit"]:
+                            controller.cancel_active()
                             cprint("  \033[38;5;141m✦ 记忆已固化，MiClaw 进入休眠。\033[0m")
                             break
 
                     except (KeyboardInterrupt, EOFError):
                         cprint("\n  \033[38;5;141m✦ 强制中断，MiClaw 进入休眠。\033[0m")
+                        controller.cancel_active()
                         await current_task_queue.put(AgentRequest(content="/exit"))
                         break
             finally:
@@ -351,7 +382,7 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
         queue_join_worker = None
         try:
             with patch_stdout():
-                worker = asyncio.create_task(agent_worker(runtime_task_queue))
+                worker = asyncio.create_task(agent_worker(runtime_task_queue, active_execution))
                 heartbeat_worker = asyncio.create_task(pacemaker_loop(runtime_task_queue, check_interval=10))
                 failure_signal = asyncio.get_running_loop().create_future()
                 worker.add_done_callback(
@@ -366,7 +397,7 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                     )
                 )
 
-                input_worker = asyncio.create_task(user_input_loop(runtime_task_queue))
+                input_worker = asyncio.create_task(user_input_loop(runtime_task_queue, active_execution))
                 done, _ = await asyncio.wait(
                     (input_worker, failure_signal),
                     return_when=asyncio.FIRST_COMPLETED,

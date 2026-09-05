@@ -78,6 +78,14 @@ miclaw run
 
 该命令只为当前 turn 建立可信的写入 eligibility；实际 `MEMORY_WRITE` 仍会经过 permission confirmation。MiClaw 不会从任意自然语言自动提取并持久化记忆。
 
+如需停止当前正在运行的 Agent execution，使用：
+
+```text
+/cancel
+```
+
+`/cancel` 只取消本次 `miclaw run` 进程中的 active execution；持久化成功时其 attempt 会标记为 `CANCELLED`。它不会清空已排队请求、不会取消其他 MiClaw 进程，也不会回滚已经完成的 Tool、MCP、文件或 Memory 副作用。
+
 如需把当前 run 显式限制在一个现有项目目录，可使用：
 
 ```bash
