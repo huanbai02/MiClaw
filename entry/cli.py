@@ -222,6 +222,104 @@ def execution_recover(
     if result.assessment.decision.value == "do_not_resume":
         raise typer.Exit(code=2)
 
+
+@execution_app.command("resume")
+def execution_resume(
+    execution_id: str,
+    attempt: Annotated[int, typer.Option("--attempt", help="要执行的明确 PENDING attempt（>=1）。")],
+    workspace: Annotated[Optional[str], typer.Option(help="指定同时包含 execution.sqlite3/state.sqlite3 的 runtime workspace。")] = None,
+    mcp_config: Annotated[
+        Optional[str],
+        typer.Option("--mcp-config", help="指定 host 控制的本地 MCP stdio JSON 配置文件。"),
+    ] = None,
+):
+    """从 predecessor 的 exact safe checkpoint 执行一个既有 PENDING attempt。"""
+    _validate_execution_cli_id(execution_id)
+    if type(attempt) is not int or attempt < 1:
+        _execution_cli_error("invalid_attempt")
+    execution_path, state_path = _execution_paths(workspace)
+    if not execution_path.is_file() or not state_path.is_file():
+        _execution_cli_error("recovery_not_available")
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from miclaw.core.agent.execution import apply_graph_recursion_limit
+    from miclaw.core.agent.graph import create_agent_app, default_agent_tools
+    from miclaw.core.agent.recovery import AgentRecoveryError, resume_pending_execution
+    from miclaw.core.execution.models import ExecutionStatus
+    from miclaw.core.mcp.client import MCPClientError
+    from miclaw.core.mcp.runtime_config import MCPRuntimeConfigError, load_mcp_stdio_configs
+    from miclaw.core.mcp.tools import MCPAgentToolRuntime, MCPToolRegistrationError
+    from miclaw.core.observability.trace import TraceContext, new_run_id
+    from miclaw.core.runtime.execution_store import ExecutionStore, ExecutionStoreError
+
+    load_dotenv(ENV_PATH)
+
+    async def resume_once():
+        store = ExecutionStore(execution_path)
+        mcp_runtime: MCPAgentToolRuntime | None = None
+        try:
+            if store.get_attempt(execution_id, attempt).state.status is not ExecutionStatus.PENDING:
+                raise AgentRecoveryError("execution_attempt_not_pending")
+            try:
+                mcp_configs = load_mcp_stdio_configs(mcp_config)
+            except MCPRuntimeConfigError:
+                raise AgentRecoveryError("invalid_mcp_config") from None
+            mcp_runtime = MCPAgentToolRuntime(mcp_configs, local_tools=default_agent_tools())
+            try:
+                await mcp_runtime.__aenter__()
+            except (MCPClientError, MCPToolRegistrationError, ValueError):
+                raise AgentRecoveryError("mcp_runtime_start_failed") from None
+            async with AsyncSqliteSaver.from_conn_string(str(state_path)) as checkpointer:
+                graph = create_agent_app(
+                    provider_name=os.getenv("DEFAULT_PROVIDER", "aliyun"),
+                    model_name=os.getenv("DEFAULT_MODEL", "glm-5"),
+                    tools=mcp_runtime.tools,
+                    checkpointer=checkpointer,
+                )
+                return await resume_pending_execution(
+                    store,
+                    graph,
+                    execution_id,
+                    attempt,
+                    config=apply_graph_recursion_limit({"configurable": {"thread_id": "local_geek_master"}}),
+                    trace_context=TraceContext(run_id=new_run_id()),
+                )
+        finally:
+            if mcp_runtime is not None:
+                try:
+                    await mcp_runtime.__aexit__(None, None, None)
+                except MCPClientError:
+                    raise AgentRecoveryError("mcp_runtime_shutdown_failed") from None
+            store.close()
+
+    grants_token = set_session_permission_grants()
+    confirmation_token = set_permission_confirmation_handler(cli_permission_confirmation_handler)
+    try:
+        result = asyncio.run(resume_once())
+    except AgentRecoveryError as exc:
+        code = str(exc)
+        if code == "execution_attempt_not_pending":
+            _execution_cli_error(code)
+        if code == "invalid_mcp_config":
+            _execution_cli_error(code)
+        _execution_cli_error("resume_not_available")
+    except ExecutionStoreError as exc:
+        _execution_cli_error("execution_not_found" if str(exc) == "execution_record_not_found" else "execution_store_error")
+    except Exception:
+        _execution_cli_error("resume_not_available")
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(grants_token)
+
+    if result.execution is None:
+        console.print(f"Resume refused: {result.assessment.reason.value}", markup=False)
+        raise typer.Exit(code=2)
+    state = result.record.state
+    console.print(f"Attempt {state.attempt} resumed and completed: {state.status.value}", markup=False)
+    if result.execution.next_attempt is not None:
+        console.print(f"Next attempt {result.execution.next_attempt.attempt} planned: pending", markup=False)
+        console.print("Attempt has not been executed.", markup=False)
+
 @app.command("config")
 def config_wizard():
     console.clear()

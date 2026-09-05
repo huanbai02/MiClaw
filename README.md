@@ -124,9 +124,12 @@ miclaw execution list --workspace /path/to/runtime-workspace
 
 ```bash
 miclaw execution recover <execution_id> --attempt 1
+miclaw execution resume <execution_id> --attempt 2
 ```
 
 `recover` 只会基于同一 workspace 的 checkpoint 进行安全 assessment：已完成图可 reconciliation 为 `SUCCEEDED`；安全的不完整 checkpoint 可能将旧 attempt 标记为 `INTERRUPTED` 并创建新的 `PENDING` attempt。该命令**不会**执行新的 attempt，也不会从 START replay；ToolNode 或缺失 checkpoint 会 fail closed。
+
+`resume` 只接受用户明确指定的既有 `PENDING` attempt，并且必须能证明其 predecessor 的 exact checkpoint 可安全继续。它从该 checkpoint continuation 执行一次；不安全、缺失或 ownership 不匹配的 checkpoint 会拒绝且保持 PENDING。新的 provider timeout 只会按既有策略计划下一个 PENDING attempt，不会自动继续执行；如需 MCP Tool，需再次显式提供当前 host-owned `--mcp-config`。
 
 查看运行日志监控面板：
 

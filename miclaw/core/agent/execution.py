@@ -349,7 +349,9 @@ def _persist_transition(store: ExecutionStore, record: ExecutionAttemptRecord, e
     """将 terminal 或 start persistence failure 转成稳定 uncertainty error。"""
     try:
         store.transition(record, expected_status=expected)
-    except ExecutionStoreError:
+    except ExecutionStoreError as exc:
+        if str(exc) == "execution_record_conflict":
+            raise AgentExecutionRuntimeError("execution_record_conflict") from None
         raise AgentExecutionRuntimeError("execution_persistence_failed") from None
 
 

@@ -11,7 +11,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from typer.testing import CliRunner
 
 from entry.cli import app
-from miclaw.core.agent.execution import AgentProviderFailure, run_agent_execution
+from miclaw.core.agent.execution import AgentProviderFailure, apply_graph_recursion_limit, run_agent_execution
 import miclaw.core.agent.graph as agent_graph
 from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
 from miclaw.core.agent.graph import create_agent_app
@@ -96,10 +96,28 @@ def test_execution_read_commands_handle_empty_and_unknown_without_creating_db(tm
 
 def test_execution_control_help_and_limit_are_discoverable():
     """控制面子命令与有界 list limit 都可发现。"""
-    for args in (["execution", "--help"], ["execution", "list", "--help"], ["execution", "show", "--help"], ["execution", "recover", "--help"]):
+    for args in (["execution", "--help"], ["execution", "list", "--help"], ["execution", "show", "--help"], ["execution", "recover", "--help"], ["execution", "resume", "--help"]):
         assert runner.invoke(app, args).exit_code == 0
     invalid = runner.invoke(app, ["execution", "list", "--limit", "0"])
     assert invalid.exit_code != 0 and "invalid_limit" in invalid.output
+
+
+def test_execution_resume_rejects_non_pending_before_graph_bootstrap(tmp_path, monkeypatch):
+    """terminal attempt 不能由 resume 打开，且拒绝发生在 provider/graph 构造之前。"""
+    _make_list_fixture(tmp_path)
+    (tmp_path / "state.sqlite3").touch()
+    monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no provider")))
+
+    result = runner.invoke(
+        app,
+        ["execution", "resume", "execution-b", "--attempt", "1", "--workspace", str(tmp_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "execution_attempt_not_pending" in result.output
+    reopened = ExecutionStore(tmp_path / "execution.sqlite3")
+    assert reopened.get_attempt("execution-b", 1).state.status is ExecutionStatus.FAILED
+    reopened.close()
 
 
 def test_real_agent_execution_is_visible_through_execution_list_and_show(tmp_path, monkeypatch):
@@ -318,6 +336,165 @@ def test_execution_recover_cli_refuses_toolnode_checkpoint_without_replay(tmp_pa
     assert tool_calls == 0
     reopened = ExecutionStore(tmp_path / "execution.sqlite3")
     assert reopened.get_attempt("execution-unsafe", 1).state.status is ExecutionStatus.INTERRUPTED
+    reopened.close()
+
+
+def test_execution_resume_cli_runs_retry_created_pending_without_replaying_tool(tmp_path, monkeypatch):
+    """retry 创建的 PENDING 经磁盘 reopen + CLI resume 后只继续 agent，不重放已完成 Tool。"""
+    state_path = tmp_path / "state.sqlite3"
+    store = ExecutionStore(tmp_path / "execution.sqlite3")
+    tool_calls = 0
+
+    @tool
+    def side_effect_tool(value: str) -> str:
+        """首 attempt 的副作用；resume 不得重新调用。"""
+        nonlocal tool_calls
+        tool_calls += 1
+        return value
+
+    class ToolThenTimeout:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content="", tool_calls=[{"name": "side_effect_tool", "args": {"value": "once"}, "id": "tool-1"}])
+            raise TimeoutError("RESUME_PROVIDER_SECRET")
+
+    first_model = ToolThenTimeout()
+    monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: first_model)
+
+    async def setup():
+        async with AsyncSqliteSaver.from_conn_string(str(state_path)) as saver:
+            graph = create_agent_app(tools=[side_effect_tool], checkpointer=saver)
+            checkpoint_run_id = new_checkpoint_run_id()
+            config = apply_checkpoint_correlation(
+                apply_graph_recursion_limit({"configurable": {"thread_id": "resume-thread"}}),
+                checkpoint_run_id,
+            )
+            result = await run_agent_execution(
+                lambda: graph.ainvoke(
+                    {"messages": [HumanMessage(content="EXECUTION_CONTROL_SECRET_PAYLOAD")]},
+                    config=config,
+                    durability="sync",
+                ),
+                execution_id="execution-retry-resume",
+                trace_context=TraceContext(run_id="first-trace"),
+                execution_store=store,
+                checkpoint_thread_id="resume-thread",
+                checkpoint_run_id=checkpoint_run_id,
+                checkpoint_id_provider=lambda: _checkpoint_id(graph, "resume-thread", checkpoint_run_id),
+            )
+            assert result.state.status is ExecutionStatus.FAILED
+            assert result.next_attempt is not None and result.next_attempt.attempt == 2
+
+    asyncio.run(setup())
+    store.close()
+    assert tool_calls == 1
+
+    class SuccessModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            return AIMessage(content="resumed")
+
+    monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: SuccessModel())
+    result = runner.invoke(
+        app,
+        ["execution", "resume", "execution-retry-resume", "--attempt", "2", "--workspace", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Attempt 2 resumed and completed: succeeded" in result.output
+    assert "EXECUTION_CONTROL_SECRET_PAYLOAD" not in result.output
+    assert tool_calls == 1
+    reopened = ExecutionStore(tmp_path / "execution.sqlite3")
+    assert reopened.get_attempt("execution-retry-resume", 1).state.status is ExecutionStatus.FAILED
+    assert reopened.get_attempt("execution-retry-resume", 2).state.status is ExecutionStatus.SUCCEEDED
+    try:
+        reopened.get_attempt("execution-retry-resume", 3)
+        raise AssertionError("success must not create attempt 3")
+    except Exception as exc:
+        assert str(exc) == "execution_record_not_found"
+    finally:
+        reopened.close()
+
+
+def test_execution_resume_cli_consumes_recovery_created_pending_attempt(tmp_path, monkeypatch):
+    """recover 创建的 INTERRUPTED + PENDING 能由下一条显式 resume 命令消费。"""
+    state_path = tmp_path / "state.sqlite3"
+    checkpoint_run_id = new_checkpoint_run_id()
+    store = ExecutionStore(tmp_path / "execution.sqlite3")
+    _running(store, "execution-recovery-resume", checkpoint_run_id=checkpoint_run_id)
+    store.close()
+    tool_calls = 0
+
+    @tool
+    def side_effect_tool(value: str) -> str:
+        """只在 checkpoint 建立前执行一次。"""
+        nonlocal tool_calls
+        tool_calls += 1
+        return value
+
+    class ToolThenTimeout:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(content="", tool_calls=[{"name": "side_effect_tool", "args": {"value": "once"}, "id": "tool-1"}])
+            raise TimeoutError("RECOVERY_RESUME_SECRET")
+
+    monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: ToolThenTimeout())
+
+    async def setup():
+        async with AsyncSqliteSaver.from_conn_string(str(state_path)) as saver:
+            graph = create_agent_app(tools=[side_effect_tool], checkpointer=saver)
+            try:
+                await graph.ainvoke(
+                    {"messages": [HumanMessage(content="safe")]},
+                    config=apply_checkpoint_correlation({"configurable": {"thread_id": "CHECKPOINT_THREAD_SECRET"}}, checkpoint_run_id),
+                    durability="sync",
+                )
+            except AgentProviderFailure:
+                pass
+
+    asyncio.run(setup())
+    assert tool_calls == 1
+
+    class SuccessModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            return AIMessage(content="resumed")
+
+    monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: SuccessModel())
+    planned = runner.invoke(
+        app,
+        ["execution", "recover", "execution-recovery-resume", "--attempt", "1", "--workspace", str(tmp_path)],
+    )
+    resumed = runner.invoke(
+        app,
+        ["execution", "resume", "execution-recovery-resume", "--attempt", "2", "--workspace", str(tmp_path)],
+    )
+
+    assert planned.exit_code == resumed.exit_code == 0
+    assert "Recovery planned." in planned.output
+    assert "Attempt 2 resumed and completed: succeeded" in resumed.output
+    assert tool_calls == 1
+    reopened = ExecutionStore(tmp_path / "execution.sqlite3")
+    assert reopened.get_attempt("execution-recovery-resume", 1).state.status is ExecutionStatus.INTERRUPTED
+    assert reopened.get_attempt("execution-recovery-resume", 2).state.status is ExecutionStatus.SUCCEEDED
     reopened.close()
 
 
