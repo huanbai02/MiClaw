@@ -110,6 +110,24 @@ miclaw run --mcp-config /path/to/mcp.json
 
 配置由本地 host 控制；模型只能选择已发现的 Tool，不能控制 executable、args、env、cwd 或 server 生命周期。MCP Tool 每次调用仍需 MiClaw permission confirmation。当前仅支持 stdio；修改配置后需重启运行时。
 
+### Execution control
+
+Execution metadata 保存在 runtime workspace 的 `execution.sqlite3`；可查看已持久化 attempts：
+
+```bash
+miclaw execution list
+miclaw execution show <execution_id>
+miclaw execution list --workspace /path/to/runtime-workspace
+```
+
+对明确 attempt 请求 targeted recovery：
+
+```bash
+miclaw execution recover <execution_id> --attempt 1
+```
+
+`recover` 只会基于同一 workspace 的 checkpoint 进行安全 assessment：已完成图可 reconciliation 为 `SUCCEEDED`；安全的不完整 checkpoint 可能将旧 attempt 标记为 `INTERRUPTED` 并创建新的 `PENDING` attempt。该命令**不会**执行新的 attempt，也不会从 START replay；ToolNode 或缺失 checkpoint 会 fail closed。
+
 查看运行日志监控面板：
 
 ```bash
@@ -165,8 +183,6 @@ miclaw skills lint --help
 - 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
 - Trace 查看：通过 `miclaw trace <run_id>` 查看指定运行的安全事件摘要。
 - Execution Runtime：顶层 Agent 调用具备受限 attempt 状态、循环保护、持久化 metadata 与定向安全恢复；不自动重放图或 Tool。
-
-Phase 5 — Task Execution & Recovery ✅。详见 [`docs/phase5_execution_runtime.md`](docs/phase5_execution_runtime.md)。
 
 ## 项目结构
 

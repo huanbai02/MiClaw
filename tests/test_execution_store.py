@@ -56,6 +56,30 @@ def test_execution_store_round_trip_and_transactional_failure_plan(tmp_path):
     store.close()
 
 
+def test_execution_store_read_queries_decode_records_and_do_not_mutate(tmp_path):
+    """控制面查询复用 Store 解码，并按 logical execution 最新 attempt 返回。"""
+    path = tmp_path / "execution.sqlite3"
+    store = ExecutionStore(path)
+    pending_a = ExecutionAttemptRecord(create_pending_execution("execution-a"))
+    store.create_attempt(pending_a)
+    _, running, at = _persist_running(store, "execution-b")
+    failed = ExecutionAttemptRecord(
+        mark_execution_failed(running, finished_at=at),
+        ExecutionFailure(ExecutionFailureSource.PROVIDER, ExecutionFailureCode.PROVIDER_TIMEOUT),
+        RetryEvaluation(RetryDecision.RETRY, RetryDecisionReason.RETRYABLE_FAILURE),
+    )
+    store.fail_and_plan_next(failed, ExecutionAttemptRecord(create_pending_execution("execution-b", attempt=2)))
+    store.close()
+
+    readonly = ExecutionStore(path, readonly=True)
+    assert [record.state.attempt for record in readonly.list_attempts("execution-b")] == [1, 2]
+    assert [(record.state.execution_id, record.state.attempt) for record in readonly.list_latest_attempts(limit=20)] == [
+        ("execution-b", 2),
+        ("execution-a", 1),
+    ]
+    readonly.close()
+
+
 def test_execution_store_rejects_duplicate_insert_and_invalid_db_enum_without_payload_leak(tmp_path):
     """禁止覆盖 attempt；未知 DB enum 必须稳定 fail closed 且不回显 row。"""
     path = tmp_path / "execution.sqlite3"
