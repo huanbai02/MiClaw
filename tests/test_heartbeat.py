@@ -4,6 +4,7 @@ import sys
 import json
 import tempfile
 import asyncio
+from contextlib import suppress
 from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -264,11 +265,45 @@ class TestHeartbeatRepeatLogic(unittest.TestCase):
 class TestHeartbeatTaskQueue(unittest.TestCase):
     """测试任务队列交互"""
 
-    def test_task_queue_put_called(self):
-        """测试任务触发时会调用 task_queue.put()"""
-        # 这是一个集成测试的占位符
-        # 实际测试需要 mock task_queue
-        self.assertTrue(True)  # 占位断言
+    def test_due_task_is_enqueued(self):
+        """到期任务由真实 heartbeat 投递到传入的 queue。"""
+        from miclaw.core.scheduler.heartbeat import pacemaker_loop
+
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8") as task_file:
+            task_path = task_file.name
+            json.dump(
+                [{
+                    "id": "task-due",
+                    "target_time": (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "description": "真实队列投递",
+                    "repeat": None,
+                    "repeat_count": None,
+                }],
+                task_file,
+                ensure_ascii=False,
+            )
+
+        async def run_test():
+            queue = asyncio.Queue()
+            import miclaw.core.scheduler.heartbeat as heartbeat
+
+            original_tasks_file = heartbeat.TASKS_FILE
+            heartbeat.TASKS_FILE = task_path
+            task = asyncio.create_task(pacemaker_loop(queue, check_interval=0.01))
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=1)
+                queue.task_done()
+                self.assertIn("真实队列投递", message)
+            finally:
+                heartbeat.TASKS_FILE = original_tasks_file
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+        try:
+            asyncio.run(run_test())
+        finally:
+            os.unlink(task_path)
 
 
 if __name__ == '__main__':

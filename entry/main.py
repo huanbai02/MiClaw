@@ -16,7 +16,6 @@ from miclaw.core.agent.execution import apply_graph_recursion_limit, run_agent_e
 from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
 from miclaw.core.agent.graph import create_agent_app
 from miclaw.core.runtime.config import DB_PATH, EXECUTION_DB_PATH
-from miclaw.core.runtime.bus import task_queue
 from miclaw.core.runtime.execution_store import ExecutionStore
 from miclaw.core.scheduler.heartbeat import pacemaker_loop
 from miclaw.core.observability.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
@@ -84,6 +83,18 @@ def cprint(text="", end="\n"):
     print_formatted_text(ANSI(str(text)), end=end)
 
 
+def _observe_critical_task(task: asyncio.Task, failure_signal: asyncio.Future, failure_code: str, *, must_run: bool = False):
+    """将关键后台任务的非取消结束转换为稳定的 runtime failure signal。"""
+    if task.cancelled():
+        return
+
+    exception = task.exception()
+    if exception is None and not must_run:
+        return
+    if not failure_signal.done():
+        failure_signal.set_result(failure_code)
+
+
 async def async_main(trace_context: TraceContext | None = None):
     print_banner()
     
@@ -101,6 +112,7 @@ async def async_main(trace_context: TraceContext | None = None):
         if trace_context is not None:
             config["configurable"]["run_id"] = trace_context.run_id
         config = apply_graph_recursion_limit(config)
+        runtime_task_queue = asyncio.Queue()
 
         class SpinnerState:
             action_words = [
@@ -147,11 +159,11 @@ async def async_main(trace_context: TraceContext | None = None):
         prompt_message = ANSI("  \033[38;5;51m❯\033[0m ")
         placeholder_text = ANSI("\033[3m\033[38;5;242minput...\033[0m")
 
-        async def agent_worker():
+        async def agent_worker(current_task_queue):
             while True:
-                user_input = await task_queue.get()
+                user_input = await current_task_queue.get()
                 if user_input.lower() in ["/exit", "/quit"]:
-                    task_queue.task_done()
+                    current_task_queue.task_done()
                     break
                 
                 spinner.current_words = spinner.action_words.copy()
@@ -222,9 +234,9 @@ async def async_main(trace_context: TraceContext | None = None):
 
                 spinner.is_spinning = False
                 cprint() # 空出舒适的行距
-                task_queue.task_done()
+                current_task_queue.task_done()
 
-        async def user_input_loop():
+        async def user_input_loop(current_task_queue):
             custom_style = Style.from_dict({
                 'bottom-toolbar': 'bg:default fg:default noreverse',
             })
@@ -247,39 +259,78 @@ async def async_main(trace_context: TraceContext | None = None):
                     
             redraw_task = asyncio.create_task(redraw_timer())
             
-            while True:
-                try:
-                    user_input = await session.prompt_async(prompt_message, placeholder=placeholder_text)
+            try:
+                while True:
+                    try:
+                        user_input = await session.prompt_async(prompt_message, placeholder=placeholder_text)
 
-                    user_input = user_input.strip()
-                    if not user_input:
-                        continue
+                        user_input = user_input.strip()
+                        if not user_input:
+                            continue
                     
 
-                    padded_bubble = f"  ❯ {user_input}    "
-                    cprint(f"\033[48;2;38;38;38m\033[38;5;255m{padded_bubble}\033[0m\n")
+                        padded_bubble = f"  ❯ {user_input}    "
+                        cprint(f"\033[48;2;38;38;38m\033[38;5;255m{padded_bubble}\033[0m\n")
                     
-                    await task_queue.put(user_input)
-                    if user_input.lower() in ["/exit", "/quit"]:
-                        cprint("  \033[38;5;141m✦ 记忆已固化，MiClaw 进入休眠。\033[0m")
+                        await current_task_queue.put(user_input)
+                        if user_input.lower() in ["/exit", "/quit"]:
+                            cprint("  \033[38;5;141m✦ 记忆已固化，MiClaw 进入休眠。\033[0m")
+                            break
+
+                    except (KeyboardInterrupt, EOFError):
+                        cprint("\n  \033[38;5;141m✦ 强制中断，MiClaw 进入休眠。\033[0m")
+                        await current_task_queue.put("/exit")
                         break
-                        
-                except (KeyboardInterrupt, EOFError):
-                    cprint("\n  \033[38;5;141m✦ 强制中断，MiClaw 进入休眠。\033[0m")
-                    await task_queue.put("/exit")
-                    break
+            finally:
+                redraw_task.cancel()
+                await asyncio.gather(redraw_task, return_exceptions=True)
 
-            redraw_task.cancel() 
-
+        worker = None
+        heartbeat_worker = None
+        input_worker = None
+        queue_join_worker = None
         try:
             with patch_stdout():
-                worker = asyncio.create_task(agent_worker())
-                heartbeat_worker = asyncio.create_task(pacemaker_loop(check_interval=10))
-                await user_input_loop()
-                await task_queue.join()
-                worker.cancel()
-                heartbeat_worker.cancel()
+                worker = asyncio.create_task(agent_worker(runtime_task_queue))
+                heartbeat_worker = asyncio.create_task(pacemaker_loop(runtime_task_queue, check_interval=10))
+                failure_signal = asyncio.get_running_loop().create_future()
+                worker.add_done_callback(
+                    lambda task: _observe_critical_task(task, failure_signal, "agent_worker_failed")
+                )
+                heartbeat_worker.add_done_callback(
+                    lambda task: _observe_critical_task(
+                        task,
+                        failure_signal,
+                        "scheduler_heartbeat_failed",
+                        must_run=True,
+                    )
+                )
+
+                input_worker = asyncio.create_task(user_input_loop(runtime_task_queue))
+                done, _ = await asyncio.wait(
+                    (input_worker, failure_signal),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if failure_signal in done:
+                    raise RuntimeError(failure_signal.result())
+                await input_worker
+
+                queue_join_worker = asyncio.create_task(runtime_task_queue.join())
+                done, _ = await asyncio.wait(
+                    (queue_join_worker, failure_signal),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if failure_signal in done:
+                    raise RuntimeError(failure_signal.result())
+                await queue_join_worker
         finally:
+            for task in (input_worker, queue_join_worker, worker, heartbeat_worker):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (input_worker, queue_join_worker, worker, heartbeat_worker) if task is not None),
+                return_exceptions=True,
+            )
             execution_store.close()
 
 def main():
