@@ -1,7 +1,7 @@
 """MiClaw tool result envelope。
 
-本模块提供内部 ToolResult 结构，当前仍通过 formatter 转回既有的
-model-facing string，后续 audit log、monitor、MCP adapter 可以复用结构化字段。
+本模块提供内部 ToolResult 结构：模型继续只看到 formatter 生成的安全文本，
+runtime 则通过 ToolMessage artifact 接收最小结构化 outcome。
 """
 
 from __future__ import annotations
@@ -9,6 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from langchain_core.messages import ToolMessage
+
+
+_TOOL_OUTCOME_ARTIFACT_KEY = "miclaw_tool_outcome"
+_TOOL_OUTCOME_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,59 @@ class ToolResult:
             "error_message": self.error_message,
             "metadata": _json_safe_dict(self.metadata),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredToolOutcome:
+    """保存在 ToolMessage artifact 中的最小 runtime outcome。"""
+
+    ok: bool
+    error_type: str | None
+
+    def __post_init__(self) -> None:
+        """拒绝 checkpoint artifact 的隐式类型转换。"""
+        if type(self.ok) is not bool or (self.error_type is not None and type(self.error_type) is not str):
+            raise ValueError("invalid_structured_tool_outcome")
+
+
+def encode_tool_outcome(result: ToolResult) -> dict[str, dict[str, bool | int | str | None]]:
+    """投影 ToolResult 的 runtime decision 字段，绝不复制 content/data/metadata。"""
+    if type(result) is not ToolResult:
+        raise TypeError("invalid_tool_result")
+    return {
+        _TOOL_OUTCOME_ARTIFACT_KEY: {
+            "version": _TOOL_OUTCOME_VERSION,
+            "ok": result.success,
+            "error_type": result.error_type,
+        }
+    }
+
+
+def extract_tool_outcome(message: ToolMessage) -> StructuredToolOutcome | None:
+    """从已知 artifact schema 读取 outcome；旧或损坏消息保持 fail-neutral。"""
+    if not isinstance(message, ToolMessage) or type(message.artifact) is not dict:
+        return None
+    if set(message.artifact) != {_TOOL_OUTCOME_ARTIFACT_KEY}:
+        return None
+    payload = message.artifact.get(_TOOL_OUTCOME_ARTIFACT_KEY)
+    if type(payload) is not dict or set(payload) != {"version", "ok", "error_type"}:
+        return None
+    if type(payload["version"]) is not int or payload["version"] != _TOOL_OUTCOME_VERSION:
+        return None
+    try:
+        return StructuredToolOutcome(ok=payload["ok"], error_type=payload["error_type"])
+    except ValueError:
+        return None
+
+
+def apply_tool_outcome_status(output: object) -> object:
+    """让官方 ToolMessage.status 与已验证的 MiClaw outcome 保持一致。"""
+    if not isinstance(output, ToolMessage):
+        return output
+    outcome = extract_tool_outcome(output)
+    if outcome is None:
+        return output
+    return output.model_copy(update={"status": "success" if outcome.ok else "error"})
 
 
 def tool_success(

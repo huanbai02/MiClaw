@@ -10,7 +10,7 @@ from contextlib import nullcontext
 
 import entry
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from miclaw.core.agent.request import AgentRequest
 import miclaw.core.agent.graph as agent_graph
 import miclaw.core.memory.permissions as memory_permissions
@@ -22,6 +22,7 @@ from miclaw.core.security.permissions import (
     set_permission_confirmation_handler,
 )
 from miclaw.core.tools import builtins
+from miclaw.core.tools.result import extract_tool_outcome
 from miclaw.core.observability.trace import TraceContext
 
 
@@ -634,18 +635,10 @@ def _run_memory_entry(
 
     state_db = tmp_path / "state.sqlite3"
     execution_db = tmp_path / "execution.sqlite3"
-    original_format_tool_result = builtins.format_tool_result_for_model
-
-    def capture_tool_result(result):
-        if result.error_type is not None:
-            tool_error_types.append(result.error_type)
-        return original_format_tool_result(result)
-
     monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: _SequenceProvider(model))
     monkeypatch.setattr(agent_graph, "MEMORY_DIR", str(memory_dir))
     monkeypatch.setattr(agent_graph, "audit_logger", _NoopLogger())
     monkeypatch.setattr(builtins, "MEMORY_DIR", str(memory_dir))
-    monkeypatch.setattr(builtins, "format_tool_result_for_model", capture_tool_result)
     monkeypatch.setattr(memory_permissions, "_permission_audit_logger", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(memory_permissions, "_permission_confirmation_audit_logger", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
@@ -661,6 +654,18 @@ def _run_memory_entry(
         asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="memory-entry-run")))
     finally:
         reset_permission_confirmation_handler(permission_token)
+
+    outcomes_by_call_id = {
+        message.tool_call_id: extract_tool_outcome(message)
+        for batch in model.inputs
+        for message in batch
+        if isinstance(message, ToolMessage)
+    }
+    tool_error_types.extend(
+        outcome.error_type
+        for outcome in outcomes_by_call_id.values()
+        if outcome is not None and outcome.error_type is not None
+    )
 
     return model, memory_dir, execution_db, rendered, tool_error_types
 

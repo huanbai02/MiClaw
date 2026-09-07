@@ -11,7 +11,7 @@ from .sandbox import (
     write_office_file,
     execute_office_shell
 )
-from .result import format_tool_result_for_model, tool_error, tool_permission_blocked
+from .result import tool_error, tool_permission_blocked, tool_success
 from ..memory.lifecycle import MemoryUpdateDisposition, write_user_profile_with_policy
 from ..memory.permissions import permission_block_message
 from ..security.permissions import PermissionDecision
@@ -50,26 +50,22 @@ def save_user_profile(new_content: str) -> str:
     """
     execution = write_user_profile_with_policy(MEMORY_DIR, new_content)
     if not execution.policy_result.eligible:
-        return format_tool_result_for_model(
-            tool_error(
-                "memory_write_not_eligible",
-                "Memory write is not eligible under current policy.",
-                metadata={"memory_write_policy": execution.policy_result.reason_code},
-            )
+        return tool_error(
+            "memory_write_not_eligible",
+            "Memory write is not eligible under current policy.",
+            metadata={"memory_write_policy": execution.policy_result.reason_code},
         )
     if execution.disposition is MemoryUpdateDisposition.NOOP_EXACT_MATCH:
-        return "记忆档案已成功覆写更新。新的人设画像已生效。"
+        return tool_success("记忆档案已成功覆写更新。新的人设画像已生效。")
     authorization = execution.authorization
     assert authorization is not None
     if authorization.final_result.decision is not PermissionDecision.ALLOW:
-        return format_tool_result_for_model(
-            tool_permission_blocked(
-                permission_block_message(authorization.final_result),
-                decision=authorization.final_result.decision.value,
-                metadata={"permission_decision": authorization.final_result.decision.value},
-            )
+        return tool_permission_blocked(
+            permission_block_message(authorization.final_result),
+            decision=authorization.final_result.decision.value,
+            metadata={"permission_decision": authorization.final_result.decision.value},
         )
-    return "记忆档案已成功覆写更新。新的人设画像已生效。"
+    return tool_success("记忆档案已成功覆写更新。新的人设画像已生效。")
 
 
 @miclaw_tool

@@ -24,6 +24,7 @@ from miclaw.core.mcp.tools import (
     mcp_agent_tool_name,
     merge_agent_tools,
 )
+from miclaw.core.tools.result import StructuredToolOutcome, extract_tool_outcome
 from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
     reset_permission_confirmation_handler,
@@ -203,6 +204,8 @@ def test_real_agent_invokes_stdio_mcp_echo_and_returns_tool_message(tmp_path, mo
     assert [tool.name for tool in provider.bound_tools][0] == "local_echo"
     assert name in [tool.name for tool in provider.bound_tools]
     assert tool_messages[-1].content == "hello MCP"
+    assert extract_tool_outcome(tool_messages[-1]) == StructuredToolOutcome(True, None)
+    assert tool_messages[-1].status == "success"
     assert _wait_process_stopped(pid)
 
 
@@ -229,6 +232,8 @@ def test_agent_mcp_tool_error_returns_tool_message_without_crashing_graph(tmp_pa
 
     tool_message = next(message for message in state["messages"] if isinstance(message, ToolMessage))
     assert "expected tool failure" in tool_message.content
+    assert extract_tool_outcome(tool_message) == StructuredToolOutcome(False, "mcp_tool_error")
+    assert tool_message.status == "error"
     assert state["messages"][-1].content == "recovered"
 
 
