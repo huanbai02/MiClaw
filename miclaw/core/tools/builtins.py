@@ -1,52 +1,213 @@
+"""默认 MiClaw builtin Tool：统一返回 ToolResult，并保护 scheduler 持久化变更。"""
+
+from __future__ import annotations
+
+import ast
 from datetime import datetime
-from .base import miclaw_tool, MiClawBaseTool
-import os
+import hashlib
 import json
-import uuid
+import os
 import threading
+import uuid
+
+from ..memory.lifecycle import MemoryUpdateDisposition, write_user_profile_with_policy
+from ..memory.permissions import permission_block_message
+from ..observability.logger import log_permission_confirmation, log_permission_decision
 from ..runtime.config import MEMORY_DIR, TASKS_FILE
+from ..security.permissions import (
+    PermissionCapability,
+    PermissionDecision,
+    PermissionRequest,
+    PermissionResult,
+    RiskLevel,
+    evaluate_permission,
+    get_permission_confirmation_handler,
+    resolve_permission,
+)
+from .base import miclaw_tool
+from .result import ToolResult, tool_error, tool_permission_blocked, tool_success
 from .sandbox import (
+    execute_office_shell,
     list_office_files,
     read_office_file,
     write_office_file,
-    execute_office_shell
 )
-from .result import tool_error, tool_permission_blocked, tool_success
-from ..memory.lifecycle import MemoryUpdateDisposition, write_user_profile_with_policy
-from ..memory.permissions import permission_block_message
-from ..security.permissions import PermissionDecision
 
 
 tasks_lock = threading.Lock()
+_permission_evaluator = evaluate_permission
+_permission_audit_logger = log_permission_decision
+_permission_confirmation_audit_logger = log_permission_confirmation
+_SCHEDULER_COLLECTION_TARGET = "scheduled-tasks"
+_ALLOWED_REPEAT_FREQUENCIES = frozenset({"hourly", "daily", "weekly", "monthly"})
+_ALLOWED_CALCULATOR_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
+_ALLOWED_CALCULATOR_UNARYOPS = (ast.UAdd, ast.USub)
+
+
+def _scheduler_task_target(task_id: str) -> str:
+    """将 task id 投影为稳定且不泄漏原始值的 logical permission target。"""
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:24]
+    return f"scheduled-task::{digest}"
+
+
+def _scheduler_permission_block_message(result: PermissionResult) -> str:
+    """把 scheduler permission 的未允许结果转换为安全模型可见文本。"""
+    if result.decision is PermissionDecision.ASK:
+        return f"Permission required: {result.reason}"
+    return f"Permission denied: {result.reason}"
+
+
+def _authorize_scheduler(operation: str, target: str, tool_name: str) -> ToolResult | None:
+    """对 scheduler 逻辑 target 执行统一 policy、confirmation 与 session grant 流程。"""
+    request = PermissionRequest(
+        capability=PermissionCapability.SCHEDULER,
+        operation=operation,
+        target=target,
+        reason="Scheduler task operation",
+        risk_level=RiskLevel.LOW if operation == "list" else RiskLevel.MEDIUM,
+        metadata={"tool_name": tool_name},
+    )
+    policy_result = _permission_evaluator(request)
+    _permission_audit_logger(request, policy_result, tool_name=tool_name, metadata=request.metadata)
+    confirmation_handler = get_permission_confirmation_handler()
+    final_result = resolve_permission(request, policy_result, confirmation_handler)
+    confirmation_source = final_result.metadata.get("confirmation_source")
+    if policy_result.decision is PermissionDecision.ASK and (
+        confirmation_handler is not None or confirmation_source == "session_grant"
+    ):
+        _permission_confirmation_audit_logger(
+            request,
+            policy_result,
+            final_result,
+            tool_name=tool_name,
+            metadata=request.metadata,
+        )
+    if final_result.decision is PermissionDecision.ALLOW:
+        return None
+    return tool_permission_blocked(
+        _scheduler_permission_block_message(final_result),
+        decision=final_result.decision.value,
+        metadata={"tool_name": tool_name, "operation": operation, "target": target},
+    )
+
+
+def _load_tasks() -> list[dict] | None:
+    """读取既有 tasks.json；缺失或空文件仍表示空列表，损坏内容 fail closed。"""
+    if not os.path.exists(TASKS_FILE):
+        return []
+    try:
+        with open(TASKS_FILE, "r", encoding="utf-8") as file:
+            content = file.read().strip()
+        tasks = json.loads(content) if content else []
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    if type(tasks) is not list or any(type(task) is not dict for task in tasks):
+        return None
+    return tasks
+
+
+def _save_tasks(tasks: list[dict]) -> bool:
+    """使用既有 tasks.json 格式持久化任务列表。"""
+    try:
+        with open(TASKS_FILE, "w", encoding="utf-8") as file:
+            json.dump(tasks, file, ensure_ascii=False, indent=2)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _validate_task_id(task_id: str) -> bool:
+    """只接受非空 task id；既有 tasks.json 的历史 id 仍可使用。"""
+    return type(task_id) is str and bool(task_id.strip())
+
+
+def _parse_future_time(value: str) -> datetime | None:
+    """验证 scheduler 时间格式及未来约束，不回显原始输入。"""
+    if type(value) is not str:
+        return None
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return parsed if parsed > datetime.now() else None
+
+
+def _validate_schedule_input(
+    target_time: str,
+    description: str,
+    repeat: str | None,
+    repeat_count: int | None,
+) -> bool:
+    """在 permission 前验证创建任务的无副作用输入。"""
+    if _parse_future_time(target_time) is None or type(description) is not str or not description.strip():
+        return False
+    if repeat is None:
+        return repeat_count is None
+    if type(repeat) is not str or repeat not in _ALLOWED_REPEAT_FREQUENCIES:
+        return False
+    return repeat_count is None or (type(repeat_count) is int and repeat_count > 0)
+
+
+def _task_fields_are_valid(tasks: list[dict]) -> bool:
+    """保证读取任务至少具备当前 scheduler/heartbeat 所需字段。"""
+    return all(
+        type(task.get("id")) is str
+        and type(task.get("target_time")) is str
+        and type(task.get("description")) is str
+        for task in tasks
+    )
+
+
+def _find_task(tasks: list[dict], task_id: str) -> dict | None:
+    """按既有 exact task id 查找单个任务。"""
+    return next((task for task in tasks if task["id"] == task_id), None)
+
+
+def _calculator_result(expression: str) -> int | float:
+    """只计算 AST 白名单中的基础数值表达式。"""
+    if type(expression) is not str or not expression.strip():
+        raise ValueError("invalid expression")
+    tree = ast.parse(expression, mode="eval")
+
+    def validate(node: ast.AST) -> None:
+        if isinstance(node, ast.Expression):
+            validate(node.body)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, _ALLOWED_CALCULATOR_BINOPS):
+            validate(node.left)
+            validate(node.right)
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, _ALLOWED_CALCULATOR_UNARYOPS):
+            validate(node.operand)
+        elif isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+            return
+        else:
+            raise ValueError("unsupported expression")
+
+    validate(tree)
+    result = eval(compile(tree, "<calculator>", "eval"), {"__builtins__": {}}, {})
+    if type(result) not in {int, float}:
+        raise ValueError("invalid result")
+    return result
 
 
 @miclaw_tool
-def get_system_model_info() -> str:
-    """
-    获取当前 MiClaw 正在运行的底层大模型（LLM）型号和提供商信息。
-    当用户询问“你是基于什么模型”、“你的底层大模型是什么”、“你是GPT还是GLM”、“现在用的什么模型”等身份问题时，调用此工具。
-    """
+def get_system_model_info() -> ToolResult:
+    """返回既有安全的 provider/model 配置摘要。"""
     provider = os.getenv("DEFAULT_PROVIDER", "unknown")
     model = os.getenv("DEFAULT_MODEL", "unknown")
-    
     if provider == "unknown" or model == "unknown":
-        return "无法获取当前的系统模型配置，可能是环境变量未正确加载。"
-        
-    return f"当前使用的模型提供商(Provider)是: {provider}，具体型号(Model)是: {model}。"
+        return tool_success("无法获取当前的系统模型配置，可能是环境变量未正确加载。")
+    return tool_success(f"当前使用的模型提供商(Provider)是: {provider}，具体型号(Model)是: {model}。")
 
 
 @miclaw_tool
-def save_user_profile(new_content: str) -> str:
-    """
-    保存或更新当前工作区对应的用户长期画像。
+def save_user_profile(new_content: str) -> ToolResult:
+    """保存或更新当前工作区对应的用户长期画像。
+
     默认 OFFICE 工作区写入全局画像；PROJECT 工作区写入当前项目范围的画像。
-    画像范围由运行时当前工作区决定，不能通过参数自行选择。
-    只有符合当前长期 Memory 写入政策的显式用户请求才可执行，且持久化仍需要权限确认。
-    仅当用户明确要求记住、保存、更新或清除长期画像时：
-    1.在你的上下文中，将新信息融入当前完整档案，并删去冲突或过时的旧信息。
-    2.将修改后的一整篇完整 Markdown 文本作为 new_content 参数传入此工具。
-    注意：此操作将完全覆盖旧文件！请确保传入的是完整的最新档案。
-    不得仅根据模型自行推断的偏好或重要事实调用此工具。
+    画像范围由运行时当前工作区决定，不能通过参数自行选择。只有符合当前长期
+    Memory 写入政策的显式用户请求才可执行，且持久化仍需要权限确认。
+    仅当用户明确要求记住、保存、更新或清除长期画像时，才将完整 Markdown 档案
+    作为 new_content 传入；不得仅根据模型自行推断的偏好或重要事实调用此工具。
     """
     execution = write_user_profile_with_policy(MEMORY_DIR, new_content)
     if not execution.policy_result.eligible:
@@ -69,226 +230,144 @@ def save_user_profile(new_content: str) -> str:
 
 
 @miclaw_tool
-def get_current_time() -> str:
-    """
-    获取当前的系统时间和日期。
-    当用户询问“现在几点”、“今天星期几”、“今天几号”等与当前时间相关的问题时，调用此工具。
-    """
+def get_current_time() -> ToolResult:
+    """返回当前本地系统时间。"""
     now = datetime.now()
-    return f"当前本地系统时间是: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    return tool_success(f"当前本地系统时间是: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 @miclaw_tool
-def calculator(expression: str) -> str:
-    """
-    一个简单的数学计算器。
-    用于计算基础的数学表达式，例如: '3 * 5' 或 '100 / 4'。
-    注意：参数 expression 必须是一个合法的 Python 数学表达式字符串。
-    """
+def calculator(expression: str) -> ToolResult:
+    """计算受限基础数学表达式，不接受 Python attribute、调用或 import。"""
     try:
-        # 警告: eval 在真实的生产环境中存在注入风险！
-        # 这里仅为了搭建核心层做快速 Demo。未来在生产级扩展中，
-        # 应该替换为基于 AST 的安全解析器，或者更专业的数学库（如 numexpr）。
-        result = eval(expression, {"__builtins__": {}}, {})
-        return f"表达式 '{expression}' 的计算结果是: {result}"
-    except Exception as e:
-        return f"计算出错，请检查表达式格式。错误信息: {str(e)}"
+        result = _calculator_result(expression)
+    except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError):
+        return tool_error("invalid_input", "计算出错，请检查表达式格式。")
+    except Exception:
+        return tool_error("tool_execution_error", "计算器执行失败。")
+    return tool_success(f"表达式 '{expression}' 的计算结果是: {result}")
 
 
 @miclaw_tool
-def schedule_task(target_time: str, description: str, repeat: str = None, repeat_count: int = None) -> str:
-    """
-    为一个未来的任务设定闹钟或提醒。
-    参数 target_time 必须是严格的格式："YYYY-MM-DD HH:MM:SS"（请先调用 get_current_time 获取当前时间，并在其基础上推算）。
-    参数 description 是需要执行的动作或要说的话。
-    
-    【高级循环功能】：
-    - repeat (可选): 设置重复频率。可选值为 "hourly", "daily", "weekly"。如果不重复请留空。
-    - repeat_count (可选): 结合 repeat 使用，表示一共需要触发几次。
-    
-    【案例教学】：
-    1. 用户说："以后每天8点提醒我喝牛奶" -> repeat="daily", repeat_count=None (无限循环)
-    2. 用户说："接下来的3天，每天提醒我吃药" -> repeat="daily", repeat_count=3 (有限循环)
-    3. 用户说："明早8点叫我起床" -> repeat=None, repeat_count=None (单次任务)
-
-    【时间歧义严格确认协议 (AM/PM Ambiguity CRITICAL)】：
-    当用户说出的时间存在 12 小时制的模糊性时（例如：只说了“7点”，没明确说早上还是晚上）：
-    1. 你必须向用户提问确认是上午还是下午。
-    2. 【死命令】：在用户明确回复“上午”或“下午”（或改为24小时制）之前，本工具处于【绝对锁定状态】！
-    3. 就算用户发省略号（如“。。”）、发脾气、或者说无关内容，你也【绝对禁止】为了讨好用户而自行猜测时间！
-    4. 严禁出现“抱歉多问了”、“默认早上”这种妥协行为。
-    5. 如果用户不明确回答，你必须坚定地回复：“抱歉，没有明确上下午，我无权为您设置闹钟。请明确告知时间段。”并立即中止工具调用。
-    """
-    try:
-        target_dt = datetime.strptime(target_time, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return "设定失败：时间格式错误，必须严格遵循 'YYYY-MM-DD HH:MM:SS' 格式。"
-    
-    now = datetime.now()
-    if target_dt <= now:
-        return (
-            "设定失败：target_time 必须晚于当前时间。"
-            f" 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')}，"
-            f" 你传入的是：{target_time}"
-        )
-
+def schedule_task(
+    target_time: str,
+    description: str,
+    repeat: str | None = None,
+    repeat_count: int | None = None,
+) -> ToolResult:
+    """创建任务；输入验证后才请求 persistent scheduler mutation permission。"""
+    if _parse_future_time(target_time) is None:
+        return tool_error("invalid_input", "设定失败：时间格式错误，必须严格遵循 'YYYY-MM-DD HH:MM:SS' 格式。")
+    if not _validate_schedule_input(target_time, description, repeat, repeat_count):
+        return tool_error("invalid_input", "设定失败：任务参数无效。")
+    blocked = _authorize_scheduler("create", _SCHEDULER_COLLECTION_TARGET, "schedule_task")
+    if blocked is not None:
+        return blocked
     with tasks_lock:
-        tasks = []
-        if os.path.exists(TASKS_FILE):
-            try:
-                with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                    if content:
-                        tasks = json.loads(content)
-            except Exception as e:
-                return f"设定失败：读取任务队列异常 {str(e)}"
-
+        tasks = _load_tasks()
+        if tasks is None or not _task_fields_are_valid(tasks):
+            return tool_error("tool_execution_error", "设定失败：任务队列不可用。")
         new_task = {
             "id": str(uuid.uuid4())[:8],
             "target_time": target_time,
             "description": description,
             "repeat": repeat,
-            "repeat_count": repeat_count
+            "repeat_count": repeat_count,
         }
         tasks.append(new_task)
-
-        try:
-            with open(TASKS_FILE, "w", encoding="utf-8") as f:
-                json.dump(tasks, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            return f"设定失败：写入任务队列异常 {str(e)}"
-
-    msg = f" 任务已成功加入队列。首发时间：{target_time} | 任务：{description}"
+        if not _save_tasks(tasks):
+            return tool_error("tool_execution_error", "设定失败：任务队列写入失败。")
+    message = f" 任务已成功加入队列。首发时间：{target_time} | 任务：{description}"
     if repeat:
-        msg += f" | 循环模式：{repeat} (共 {repeat_count if repeat_count else '无限'} 次)"
-    return msg
+        message += f" | 循环模式：{repeat} (共 {repeat_count if repeat_count else '无限'} 次)"
+    return tool_success(message)
 
 
 @miclaw_tool
-def list_scheduled_tasks() -> str:
-    """
-    查看当前所有待处理的定时任务列表。
-    当用户询问“我都有哪些任务”、“查一下闹钟”、“刚才定了什么”时调用此工具。
-    """
+def list_scheduled_tasks() -> ToolResult:
+    """列出当前任务；低风险 scheduler read 仍经过 permission policy 但不要求确认。"""
+    blocked = _authorize_scheduler("list", _SCHEDULER_COLLECTION_TARGET, "list_scheduled_tasks")
+    if blocked is not None:
+        return blocked
     with tasks_lock:
-        if not os.path.exists(TASKS_FILE):
-            return "当前没有任何定时任务。"
-        
-        try:
-            with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if not content:
-                    return "任务列表为空。"
-                tasks = json.loads(content)
-            
-            if not tasks:
-                return "当前没有任何定时任务。"
-            
-            tasks.sort(key=lambda x: x['target_time'])
-            
-            res = " 当前待执行任务列表：\n"
-            for t in tasks:
-                res += f"- [ID: {t['id']}] 时间: {t['target_time']} | 任务: {t['description']}\n"
-            return res
-        except Exception as e:
-            return f"查询失败：{str(e)}"
-    
+        tasks = _load_tasks()
+        if tasks is None or not _task_fields_are_valid(tasks):
+            return tool_error("tool_execution_error", "查询失败：任务队列不可用。")
+        if not tasks:
+            return tool_success("当前没有任何定时任务。")
+        ordered_tasks = sorted(tasks, key=lambda task: task["target_time"])
+    lines = [" 当前待执行任务列表："]
+    lines.extend(
+        f"- [ID: {task['id']}] 时间: {task['target_time']} | 任务: {task['description']}"
+        for task in ordered_tasks
+    )
+    return tool_success("\n".join(lines) + "\n")
+
 
 @miclaw_tool
-def delete_scheduled_task(task_id: str) -> str:
-    """
-    根据任务 ID 取消或删除一个定时任务。
-    
-    【强制性风险控制协议 (CRITICAL)】：
-    删除操作具有不可逆性。
-    1. 只要匹配到符合描述的任务数量 > 1。
-    2. 无论用户语气多么确定，只要他没提供具体的任务 ID。
-    
-    【你必须执行的动作】：
-    【禁止】在单次回复中针对同一个模糊描述发起多个删除工具调用。
-    你必须先列出所有匹配的任务（1. 2. 3.），并询问用户：
-    “发现了多个符合条件的提醒（列出列表），为了安全起见，请问是要全部删除，还是只删除其中几个？”
-    必须要用户明确给出编号或者说确定全部删除，才能调用此工具！！
-    严禁自作主张执行批量删除。
-    """
-
+def delete_scheduled_task(task_id: str) -> ToolResult:
+    """删除 exact task id；目标存在后才请求 mutation permission。"""
+    if not _validate_task_id(task_id):
+        return tool_error("invalid_target", "删除失败：任务 ID 无效。")
     with tasks_lock:
-        if not os.path.exists(TASKS_FILE):
-            return "删除失败：任务列表文件不存在。"
+        tasks = _load_tasks()
+        if tasks is None or not _task_fields_are_valid(tasks):
+            return tool_error("tool_execution_error", "删除失败：任务队列不可用。")
+        if _find_task(tasks, task_id) is None:
+            return tool_error("invalid_target", "删除失败：未找到指定任务。")
+    blocked = _authorize_scheduler("delete", _scheduler_task_target(task_id), "delete_scheduled_task")
+    if blocked is not None:
+        return blocked
+    with tasks_lock:
+        tasks = _load_tasks()
+        if tasks is None or not _task_fields_are_valid(tasks):
+            return tool_error("tool_execution_error", "删除失败：任务队列不可用。")
+        new_tasks = [task for task in tasks if task["id"] != task_id]
+        if len(new_tasks) == len(tasks):
+            return tool_error("invalid_target", "删除失败：未找到指定任务。")
+        if not _save_tasks(new_tasks):
+            return tool_error("tool_execution_error", "删除失败：任务队列写入失败。")
+    return tool_success(f" 任务 [ID: {task_id}] 已成功取消。")
 
-        try:
-            with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                tasks = json.loads(content) if content else []
-            
-            new_tasks = [t for t in tasks if t['id'] != task_id]
-            
-            if len(new_tasks) == len(tasks):
-                return f"删除失败：未找到 ID 为 {task_id} 的任务。"
-            
-            with open(TASKS_FILE, "w", encoding="utf-8") as f:
-                json.dump(new_tasks, f, ensure_ascii=False, indent=2)
-            
-            return f" 任务 [ID: {task_id}] 已成功取消。"
-        except Exception as e:
-            return f"操作异常：{str(e)}"
-    
 
 @miclaw_tool
-def modify_scheduled_task(task_id: str, new_time: str = None, new_description: str = None) -> str:
-    """
-    修改现有定时任务的时间或内容。
-    
-    【强制性风险控制协议 (CRITICAL)】：
-    1. 只要用户通过“模糊描述”（如：那个5天的任务、洗澡的任务）来要求修改，而没有直接提供 ID。
-    2. 无论用户的话语看起来是单数还是复数（如：“把5天的任务全改了”）。
-    3. 只要系统中匹配到的任务数量 > 1。
-    
-    【你必须执行的动作】：
-    禁止直接调用本工具！你必须向用户展示匹配到的所有任务列表，并强制询问：
-    “我发现有 [N] 个任务符合描述（列出列表），请问你是要【全部修改】，还是修改其中【某几个】？（请告诉我编号或确认全部）”
-    
-    必须在用户回复“全部”或者指定了具体编号后，你才能继续操作！修改任务并非小事,这是为了安全！！
-    """
-
+def modify_scheduled_task(
+    task_id: str,
+    new_time: str | None = None,
+    new_description: str | None = None,
+) -> ToolResult:
+    """修改 exact task id；无效输入或不存在 target 均不会触发 confirmation。"""
+    if not _validate_task_id(task_id):
+        return tool_error("invalid_target", "修改失败：任务 ID 无效。")
+    if new_time is None and new_description is None:
+        return tool_error("invalid_input", "修改失败：必须提供新的时间或任务内容。")
+    if new_time is not None and _parse_future_time(new_time) is None:
+        return tool_error("invalid_input", "修改失败：时间格式错误。")
+    if new_description is not None and (type(new_description) is not str or not new_description.strip()):
+        return tool_error("invalid_input", "修改失败：任务内容无效。")
     with tasks_lock:
-        if not os.path.exists(TASKS_FILE):
-            return "修改失败：任务列表为空。"
-
-        try:
-            with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                tasks = json.loads(content) if content else []
-            
-            found = False
-            for t in tasks:
-                if t['id'] == task_id:
-                    if new_time:
-                        parsed_new_time = datetime.strptime(new_time, "%Y-%m-%d %H:%M:%S")
-                        now = datetime.now()
-                        if parsed_new_time <= now:
-                            return (
-                                "修改失败：new_time 必须晚于当前时间。"
-                                f" 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')}，"
-                                f" 你传入的是：{new_time}"
-                            )
-                        t['target_time'] = new_time
-                    if new_description:
-                        t['description'] = new_description
-                    found = True
-                    break
-            
-            if not found:
-                return f"修改失败：未找到 ID 为 {task_id} 的任务。"
-            
-            with open(TASKS_FILE, "w", encoding="utf-8") as f:
-                json.dump(tasks, f, ensure_ascii=False, indent=2)
-                
-            return f" 任务 [ID: {task_id}] 已成功更新。"
-        except ValueError:
-            return "修改失败：时间格式错误。"
-        except Exception as e:
-            return f"操作异常：{str(e)}"
+        tasks = _load_tasks()
+        if tasks is None or not _task_fields_are_valid(tasks):
+            return tool_error("tool_execution_error", "修改失败：任务队列不可用。")
+        if _find_task(tasks, task_id) is None:
+            return tool_error("invalid_target", "修改失败：未找到指定任务。")
+    blocked = _authorize_scheduler("modify", _scheduler_task_target(task_id), "modify_scheduled_task")
+    if blocked is not None:
+        return blocked
+    with tasks_lock:
+        tasks = _load_tasks()
+        if tasks is None or not _task_fields_are_valid(tasks):
+            return tool_error("tool_execution_error", "修改失败：任务队列不可用。")
+        task = _find_task(tasks, task_id)
+        if task is None:
+            return tool_error("invalid_target", "修改失败：未找到指定任务。")
+        if new_time is not None:
+            task["target_time"] = new_time
+        if new_description is not None:
+            task["description"] = new_description
+        if not _save_tasks(tasks):
+            return tool_error("tool_execution_error", "修改失败：任务队列写入失败。")
+    return tool_success(f" 任务 [ID: {task_id}] 已成功更新。")
 
 
 BUILTIN_TOOLS = [
@@ -303,5 +382,5 @@ BUILTIN_TOOLS = [
     schedule_task,
     list_scheduled_tasks,
     delete_scheduled_task,
-    modify_scheduled_task
+    modify_scheduled_task,
 ]

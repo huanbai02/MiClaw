@@ -16,7 +16,7 @@ from miclaw.core.agent.active_execution import ActiveExecutionController
 from miclaw.core.agent.execution import apply_graph_recursion_limit, new_execution_id, run_agent_execution
 from miclaw.core.agent.recovery import apply_checkpoint_correlation, latest_owned_checkpoint, new_checkpoint_run_id
 from miclaw.core.agent.graph import create_agent_app, default_agent_tools
-from miclaw.core.agent.request import AgentRequest
+from miclaw.core.agent.request import AgentRequest, AgentRequestOrigin
 from miclaw.core.mcp.client import MCPClientError
 from miclaw.core.mcp.runtime_config import MCPRuntimeConfigError, load_mcp_stdio_configs
 from miclaw.core.mcp.tools import MCPAgentToolRuntime, MCPToolRegistrationError
@@ -26,6 +26,7 @@ from miclaw.core.memory.lifecycle import (
     set_memory_write_intent,
 )
 from miclaw.core.runtime.config import DB_PATH, EXECUTION_DB_PATH
+from miclaw.core.security.permissions import reset_session_permission_grants, set_session_permission_grants
 from miclaw.core.runtime.execution_store import ExecutionStore
 from miclaw.core.scheduler.heartbeat import pacemaker_loop
 from miclaw.core.observability.trace import TraceContext, new_run_id, reset_trace_context, set_current_trace_context
@@ -118,9 +119,10 @@ def _parse_user_request(user_input: str) -> AgentRequest | None:
             return None
         return AgentRequest(
             content=f"请记住以下信息：{content}",
+            origin=AgentRequestOrigin.INTERACTIVE,
             memory_write_intent=MemoryWriteIntent.EXPLICIT_USER_REQUEST,
         )
-    return AgentRequest(content=user_input)
+    return AgentRequest(content=user_input, origin=AgentRequestOrigin.INTERACTIVE)
 
 
 async def async_main(trace_context: TraceContext | None = None, mcp_config_path: str | None = None):
@@ -217,11 +219,14 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                 if not isinstance(request, AgentRequest):
                     current_task_queue.task_done()
                     raise RuntimeError("invalid_agent_request")
-                if request.content.lower() in ["/exit", "/quit"]:
+                if request.origin is AgentRequestOrigin.INTERACTIVE and request.content.lower() in ["/exit", "/quit"]:
                     current_task_queue.task_done()
                     break
 
                 intent_token = None
+                grant_token = None
+                if request.origin is AgentRequestOrigin.SCHEDULER:
+                    grant_token = set_session_permission_grants()
                 if request.memory_write_intent is not None:
                     intent_token = set_memory_write_intent(request.memory_write_intent)
                 try:
@@ -308,6 +313,8 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                 finally:
                     if intent_token is not None:
                         reset_memory_write_intent(intent_token)
+                    if grant_token is not None:
+                        reset_session_permission_grants(grant_token)
                     spinner.is_spinning = False
                     cprint() # 空出舒适的行距
                     current_task_queue.task_done()
@@ -370,7 +377,9 @@ async def async_main(trace_context: TraceContext | None = None, mcp_config_path:
                     except (KeyboardInterrupt, EOFError):
                         cprint("\n  \033[38;5;141m✦ 强制中断，MiClaw 进入休眠。\033[0m")
                         controller.cancel_active()
-                        await current_task_queue.put(AgentRequest(content="/exit"))
+                        await current_task_queue.put(
+                            AgentRequest(content="/exit", origin=AgentRequestOrigin.INTERACTIVE)
+                        )
                         break
             finally:
                 redraw_task.cancel()

@@ -294,3 +294,56 @@ def test_resolve_non_ask_does_not_call_confirmation_handler(policy_result):
     )
 
     assert result is policy_result
+
+
+def scheduler_request(operation, target, risk_level):
+    """构造 scheduler logical target 的 policy request。"""
+    return PermissionRequest(
+        capability=PermissionCapability.SCHEDULER,
+        operation=operation,
+        target=target,
+        reason="scheduler test",
+        risk_level=risk_level,
+        metadata={"tool_name": "scheduler_test"},
+    )
+
+
+def test_scheduler_list_is_low_risk_allow():
+    """读取 runtime-owned task list 不要求交互确认。"""
+    result = evaluate_permission(
+        scheduler_request("list", "scheduled-tasks", RiskLevel.LOW)
+    )
+
+    assert result.decision is PermissionDecision.ALLOW
+
+
+@pytest.mark.parametrize(
+    "operation,target",
+    [
+        ("create", "scheduled-tasks"),
+        ("modify", "scheduled-task::" + "a" * 24),
+        ("delete", "scheduled-task::" + "a" * 24),
+    ],
+)
+def test_scheduler_persistent_mutations_require_confirmation(operation, target):
+    """创建、修改、删除持久化任务统一要求 ASK。"""
+    result = evaluate_permission(scheduler_request(operation, target, RiskLevel.MEDIUM))
+
+    assert result.decision is PermissionDecision.ASK
+    assert result.requires_confirmation is True
+
+
+@pytest.mark.parametrize(
+    "operation,target,risk_level",
+    [
+        ("list", "scheduled-tasks", RiskLevel.MEDIUM),
+        ("create", "scheduled-task::" + "a" * 24, RiskLevel.MEDIUM),
+        ("modify", "scheduled-tasks", RiskLevel.MEDIUM),
+        ("delete", "scheduled-task::not-a-valid-target", RiskLevel.MEDIUM),
+    ],
+)
+def test_invalid_scheduler_permission_requests_fail_closed(operation, target, risk_level):
+    """scheduler target/operation 不符合逻辑 identity 时不得 fail open。"""
+    result = evaluate_permission(scheduler_request(operation, target, risk_level))
+
+    assert result.decision is PermissionDecision.DENY

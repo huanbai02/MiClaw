@@ -3,7 +3,7 @@ import json
 import asyncio
 import calendar
 from datetime import datetime, timedelta
-from ..agent.request import AgentRequest
+from ..agent.request import AgentRequest, AgentRequestOrigin
 from ..runtime.config import TASKS_FILE
 from ..tools.builtins import tasks_lock
 
@@ -97,4 +97,6 @@ async def pacemaker_loop(task_queue: asyncio.Queue, check_interval: int = 10):
                 f"你设定的定时任务已到期，请立即主动提醒用户或执行动作。\n"
                 f"任务内容：{t['description']}"
             )
-            await task_queue.put(AgentRequest(content=system_msg))
+            await task_queue.put(
+                AgentRequest(content=system_msg, origin=AgentRequestOrigin.SCHEDULER)
+            )

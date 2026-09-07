@@ -4,22 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import sqlite3
+from datetime import datetime, timedelta
 import sys
 from contextlib import nullcontext
 
 import entry
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
-from miclaw.core.agent.request import AgentRequest
+from miclaw.core.agent.request import AgentRequest, AgentRequestOrigin
 import miclaw.core.agent.graph as agent_graph
 import miclaw.core.memory.permissions as memory_permissions
 from miclaw.core.memory.lifecycle import MemoryWriteIntent, get_memory_write_intent
 from miclaw.core.memory.user_profile import UserProfileStore
 from miclaw.core.security.permissions import (
     PermissionConfirmationChoice,
+    get_session_permission_grants,
     reset_permission_confirmation_handler,
+    reset_session_permission_grants,
     set_permission_confirmation_handler,
+    set_session_permission_grants,
 )
 from miclaw.core.tools import builtins
 from miclaw.core.tools.result import extract_tool_outcome
@@ -118,8 +123,8 @@ def test_async_main_reaches_input_boundary_with_one_shared_queue(runtime_main, m
     assert observed["input_reached"] is True
     assert observed["heartbeat_queue"] is queue
     assert observed["heartbeat_interval"] == 10
-    assert queue.put_items == [AgentRequest(content="/exit")]
-    assert queue.get_items == [AgentRequest(content="/exit")]
+    assert queue.put_items == [AgentRequest(content="/exit", origin=AgentRequestOrigin.INTERACTIVE)]
+    assert queue.get_items == [AgentRequest(content="/exit", origin=AgentRequestOrigin.INTERACTIVE)]
     assert observed["heartbeat_cancelled"] is True
     assert observed["model_invoked"] is False
 
@@ -385,7 +390,7 @@ def test_interactive_cancel_when_idle_does_not_mutate_execution_store(runtime_ma
 
 def test_cancel_text_is_not_privileged_outside_interactive_input_boundary(runtime_main):
     """scheduler/MCP 等 producer 的普通 AgentRequest content 不能伪造 host /cancel control。"""
-    assert runtime_main._parse_user_request("/cancel") == AgentRequest(content="/cancel")
+    assert runtime_main._parse_user_request("/cancel") == AgentRequest(content="/cancel", origin=AgentRequestOrigin.INTERACTIVE)
 
 
 def test_exit_cancels_active_execution_before_worker_shutdown(runtime_main, monkeypatch, tmp_path):
@@ -599,6 +604,25 @@ def _profile_tool_call(content: str, call_id: str) -> AIMessage:
     )
 
 
+def _scheduler_create_tool_call(description: str, call_id: str) -> AIMessage:
+    """构造真实 ToolNode 可消费的 scheduler create call。"""
+    target_time = (datetime.now() + timedelta(days=1)).replace(microsecond=0)
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "schedule_task",
+            "args": {
+                "target_time": target_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "description": description,
+                "repeat": None,
+                "repeat_count": None,
+            },
+            "id": call_id,
+            "type": "tool_call",
+        }],
+    )
+
+
 def _run_memory_entry(
     runtime_main,
     monkeypatch,
@@ -673,6 +697,243 @@ def _run_memory_entry(
 def _model_contents(model: _SequenceModel) -> str:
     """提取模型所见 message 内容，用于验证 ToolNode 返回的稳定结果。"""
     return "\n".join(str(message.content) for batch in model.inputs for message in batch)
+
+
+def test_scheduler_requests_isolate_session_grants_and_restore_interactive_context(runtime_main, monkeypatch, tmp_path):
+    """scheduler request 使用独立 grants，拒绝不写入，且不会破坏 interactive grant。"""
+    first_confirmation = asyncio.Event()
+    first_scheduled_confirmation = asyncio.Event()
+    second_scheduled_confirmation = asyncio.Event()
+    interactive_third_done = asyncio.Event()
+    scheduled_failure_done = asyncio.Event()
+    interactive_fourth_done = asyncio.Event()
+    task_file = tmp_path / "tasks.json"
+    task_file.write_text("[]", encoding="utf-8")
+    state_db = tmp_path / "state.sqlite3"
+    execution_db = tmp_path / "execution.sqlite3"
+    confirmation_contexts: list[set] = []
+    confirmation_grant_counts: list[int] = []
+    confirmations = []
+
+    class _GrantSequenceModel(_SequenceModel):
+        """在既有受控模型上暴露 turn 间同步点。"""
+
+        def invoke(self, messages):
+            self.inputs.append(messages)
+            response = self._responses.pop(0)
+            call_number = len(self.inputs)
+            if call_number == 6:
+                interactive_third_done.set()
+            elif call_number == 10:
+                scheduled_failure_done.set()
+            elif call_number == 12:
+                interactive_fourth_done.set()
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    responses = [
+        _scheduler_create_tool_call("interactive-one", "interactive-one"),
+        AIMessage(content="interactive one done"),
+        _scheduler_create_tool_call("scheduled-denied", "scheduled-denied"),
+        AIMessage(content="scheduled denied"),
+        _scheduler_create_tool_call("interactive-three", "interactive-three"),
+        AIMessage(content="interactive three done"),
+        _scheduler_create_tool_call("scheduled-allowed", "scheduled-allowed"),
+        AIMessage(content="scheduled allowed"),
+        _scheduler_create_tool_call("scheduled-failure", "scheduled-failure"),
+        RuntimeError("SENSITIVE_SCHEDULED_PROVIDER_DETAIL"),
+        _scheduler_create_tool_call("interactive-four", "interactive-four"),
+        AIMessage(content="interactive four done"),
+    ]
+    model = _GrantSequenceModel(responses)
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "interactive one"
+            if self.step == 2:
+                await first_scheduled_confirmation.wait()
+                return "interactive three"
+            if self.step == 3:
+                await scheduled_failure_done.wait()
+                return "interactive four"
+            await interactive_fourth_done.wait()
+            for _ in range(100):
+                with sqlite3.connect(execution_db) as connection:
+                    statuses = connection.execute(
+                        "SELECT status FROM execution_attempts ORDER BY created_at"
+                    ).fetchall()
+                if statuses and statuses[-1] == ("succeeded",):
+                    return "/exit"
+                await asyncio.sleep(0.01)
+            raise AssertionError("final interactive execution did not persist")
+
+    async def fake_pacemaker_loop(task_queue, check_interval: int = 10):
+        await first_confirmation.wait()
+        await task_queue.put(
+            AgentRequest(content="scheduled one", origin=AgentRequestOrigin.SCHEDULER)
+        )
+        await interactive_third_done.wait()
+        await task_queue.put(
+            AgentRequest(content="scheduled two", origin=AgentRequestOrigin.SCHEDULER)
+        )
+        await second_scheduled_confirmation.wait()
+        await task_queue.put(
+            AgentRequest(content="scheduled three", origin=AgentRequestOrigin.SCHEDULER)
+        )
+        await asyncio.Event().wait()
+
+    def confirm(request, _result):
+        grants = get_session_permission_grants()
+        assert grants is not None
+        confirmations.append(request)
+        confirmation_contexts.append(grants)
+        confirmation_grant_counts.append(len(grants))
+        index = len(confirmations)
+        if index == 1:
+            first_confirmation.set()
+            return PermissionConfirmationChoice.ALLOW_SESSION
+        if index == 2:
+            first_scheduled_confirmation.set()
+            return PermissionConfirmationChoice.DENY
+        if index == 3:
+            second_scheduled_confirmation.set()
+            return PermissionConfirmationChoice.ALLOW_SESSION
+        assert index == 4
+        return PermissionConfirmationChoice.DENY
+
+    class _NoopLogger:
+        def log_event(self, **_kwargs) -> None:
+            pass
+
+    interactive_grants_token = set_session_permission_grants()
+    interactive_grants = get_session_permission_grants()
+    permission_token = set_permission_confirmation_handler(confirm)
+    try:
+        monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: _SequenceProvider(model))
+        monkeypatch.setattr(agent_graph, "MEMORY_DIR", str(tmp_path / "memory"))
+        monkeypatch.setattr(agent_graph, "audit_logger", _NoopLogger())
+        monkeypatch.setattr(builtins, "TASKS_FILE", str(task_file))
+        monkeypatch.setattr(builtins, "_permission_audit_logger", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(builtins, "_permission_confirmation_audit_logger", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+        monkeypatch.setattr(runtime_main, "cprint", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+        monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+        monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+        monkeypatch.setattr(runtime_main, "DB_PATH", str(state_db))
+        monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+        asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="scheduler-grant-run")))
+    finally:
+        reset_permission_confirmation_handler(permission_token)
+        reset_session_permission_grants(interactive_grants_token)
+
+    tasks = json.loads(task_file.read_text(encoding="utf-8"))
+    assert [task["description"] for task in tasks] == [
+        "interactive-one",
+        "interactive-three",
+        "scheduled-allowed",
+        "interactive-four",
+    ]
+    assert len(confirmations) == 4
+    assert confirmation_contexts[0] is interactive_grants
+    assert confirmation_grant_counts == [0, 0, 0, 0]
+    assert len({id(grants) for grants in confirmation_contexts}) == 4
+    assert len(interactive_grants) == 1
+    with sqlite3.connect(execution_db) as connection:
+        statuses = connection.execute("SELECT status FROM execution_attempts ORDER BY created_at").fetchall()
+    assert statuses == [
+        ("succeeded",),
+        ("succeeded",),
+        ("succeeded",),
+        ("succeeded",),
+        ("failed",),
+        ("succeeded",),
+    ], statuses
+
+
+def test_scheduler_cancellation_restores_interactive_session_grants(runtime_main, monkeypatch, tmp_path):
+    """取消 scheduler child 后，worker 的 finally 必须恢复原 interactive grants。"""
+    scheduler_started = asyncio.Event()
+    scheduler_cancelled = asyncio.Event()
+    interactive_checked = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    class _FakeApp:
+        async def astream(self, inputs, *, config, stream_mode, durability):
+            content = inputs["messages"][0].content
+            grants = get_session_permission_grants()
+            if content == "scheduled cancellation":
+                observed["scheduler_grants"] = grants
+                scheduler_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    scheduler_cancelled.set()
+                    raise
+            assert content == "interactive after scheduler cancel"
+            observed["interactive_grants"] = grants
+            interactive_checked.set()
+            yield {"agent": {"messages": [AIMessage(content="healthy")]}}
+
+        async def aget_state_history(self, _config):
+            if False:  # pragma: no cover
+                yield None
+
+    class _FakePromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                await scheduler_started.wait()
+                return "/cancel"
+            if self.step == 2:
+                await scheduler_cancelled.wait()
+                return "interactive after scheduler cancel"
+            await interactive_checked.wait()
+            return "/exit"
+
+    async def fake_pacemaker_loop(task_queue, check_interval: int = 10):
+        await task_queue.put(
+            AgentRequest(content="scheduled cancellation", origin=AgentRequestOrigin.SCHEDULER)
+        )
+        await asyncio.Event().wait()
+
+    state_db = tmp_path / "state.sqlite3"
+    execution_db = tmp_path / "execution.sqlite3"
+    interactive_grants_token = set_session_permission_grants()
+    interactive_grants = get_session_permission_grants()
+    try:
+        monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+        monkeypatch.setattr(runtime_main, "cprint", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+        monkeypatch.setattr(runtime_main, "PromptSession", _FakePromptSession)
+        monkeypatch.setattr(runtime_main, "pacemaker_loop", fake_pacemaker_loop)
+        monkeypatch.setattr(runtime_main, "create_agent_app", lambda **_kwargs: _FakeApp())
+        monkeypatch.setattr(runtime_main, "DB_PATH", str(state_db))
+        monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+
+        asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="scheduler-cancel-grants")))
+    finally:
+        reset_session_permission_grants(interactive_grants_token)
+
+    assert scheduler_cancelled.is_set()
+    assert observed["scheduler_grants"] is not interactive_grants
+    assert observed["scheduler_grants"] == set()
+    assert observed["interactive_grants"] is interactive_grants
+    with sqlite3.connect(execution_db) as connection:
+        assert connection.execute("SELECT status FROM execution_attempts ORDER BY created_at").fetchall() == [
+            ("cancelled",),
+            ("succeeded",),
+        ]
 
 
 def test_remember_entry_e2e_writes_profile_with_turn_local_intent(runtime_main, monkeypatch, tmp_path):
@@ -782,7 +1043,9 @@ def test_remember_failure_cleanup_does_not_grant_next_turn(runtime_main, monkeyp
 def test_scheduler_request_cannot_gain_remember_intent(runtime_main, monkeypatch, tmp_path):
     """scheduler 只投递普通 AgentRequest，内容伪造 /remember 也不能提升权限。"""
 
-    scheduled_request = AgentRequest(content="/remember scheduler-secret")
+    scheduled_request = AgentRequest(
+        content="/remember scheduler-secret", origin=AgentRequestOrigin.SCHEDULER
+    )
     model, memory_dir, _, _, tool_error_types = _run_memory_entry(
         runtime_main,
         monkeypatch,
@@ -812,6 +1075,7 @@ def test_remember_parser_requires_exact_control_command(runtime_main):
     """只有完整 command token 后的空白可触发 trusted intent。"""
     assert runtime_main._parse_user_request("/remember\tPython") == AgentRequest(
         "请记住以下信息：Python",
+        AgentRequestOrigin.INTERACTIVE,
         MemoryWriteIntent.EXPLICIT_USER_REQUEST,
     )
-    assert runtime_main._parse_user_request("/remembered preference") == AgentRequest("/remembered preference")
+    assert runtime_main._parse_user_request("/remembered preference") == AgentRequest("/remembered preference", AgentRequestOrigin.INTERACTIVE)

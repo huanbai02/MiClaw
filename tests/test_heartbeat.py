@@ -8,7 +8,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock, MagicMock
 
-from miclaw.core.agent.request import AgentRequest
+from miclaw.core.agent.request import AgentRequest, AgentRequestOrigin
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -297,6 +297,7 @@ class TestHeartbeatTaskQueue(unittest.TestCase):
                 queue.task_done()
                 self.assertIsInstance(message, AgentRequest)
                 self.assertIn("真实队列投递", message.content)
+                self.assertIs(message.origin, AgentRequestOrigin.SCHEDULER)
                 self.assertIsNone(message.memory_write_intent)
             finally:
                 heartbeat.TASKS_FILE = original_tasks_file

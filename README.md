@@ -191,6 +191,8 @@ miclaw skills lint --help
 - 沙盒工具：提供 office 目录内的文件列表、读取、写入和 Shell 执行能力。
 - 长期记忆：通过 Markdown 档案维护用户画像；使用 `/remember <content>` 显式请求更新，且仍需 permission confirmation。
 - 定时任务：后台心跳循环检查 `tasks.json`，到点后把任务投递给智能体处理。
+  创建、修改和删除定时任务会请求 MiClaw permission confirmation；列表读取为低风险操作。interactive 的 `ALLOW_SESSION` 仅复用于 interactive 请求；每个到期任务使用独立 permission-session grants，并重新检查文件、Shell、MCP 和 Memory 权限。
+  当前仍是基础 `tasks.json` heartbeat，不包含 Scheduler 2.0 的任务 execution identity、暂停、自动 retry 或 recovery。
 - 技能加载：从 `SKILL.md` 动态加载工具说明，支持懒加载和缓存刷新。
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
 - 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
