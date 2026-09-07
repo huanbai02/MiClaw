@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from entry import monitor
 from entry.cli import app as cli_app
 import miclaw.core.agent.graph as agent
+from miclaw.core.agent.execution import AgentToolFailure
 import miclaw.core.memory.lifecycle as memory_lifecycle
 import miclaw.core.memory.user_profile as user_profile
 import miclaw.core.observability.logger as logger_module
@@ -212,7 +213,8 @@ def test_no_intent_agent_tool_does_no_lifecycle_work_and_preserves_context(runti
         lambda _request, _result: confirmations.append(1) or PermissionConfirmationChoice.ALLOW_SESSION
     )
     try:
-        _invoke(app, model, "no-intent-write-run")
+        with pytest.raises(AgentToolFailure, match="^safety_blocked"):
+            _invoke(app, model, "no-intent-write-run")
         prompt = _invoke(app, model, "no-intent-read-run")
     finally:
         reset_permission_confirmation_handler(confirmation_token)

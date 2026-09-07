@@ -139,6 +139,8 @@ miclaw execution resume <execution_id> --attempt 2
 
 `resume` 只接受用户明确指定的既有 `PENDING` attempt，并且必须能证明其 predecessor 的 exact checkpoint 可安全继续。它从该 checkpoint continuation 执行一次；不安全、缺失或 ownership 不匹配的 checkpoint 会拒绝且保持 PENDING。新的 provider timeout 只会按既有策略计划下一个 PENDING attempt，不会自动继续执行；如需 MCP Tool，需再次显式提供当前 host-owned `--mcp-config`。
 
+结构化 Tool failure 会按稳定分类处理：可由模型修正的输入、权限、timeout 或 transient 问题会交回 Agent 继续推理；hard safety block、无效运行时配置和未知结构化错误会结束当前 attempt。Tool timeout/transient 不会自动重试整轮 graph，已完成的 Tool 副作用不会回滚。
+
 查看运行日志监控面板：
 
 ```bash

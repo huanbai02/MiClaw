@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 import miclaw.core.agent.graph as agent_graph
 import miclaw.core.tools.builtins as builtins
 import miclaw.core.tools.sandbox as sandbox_tools
-from miclaw.core.agent.execution import run_agent_execution
+from miclaw.core.agent.execution import AgentToolFailure, run_agent_execution
 from miclaw.core.execution.models import ExecutionStatus
 from miclaw.core.observability.trace import TraceContext
 from miclaw.core.tools.base import miclaw_tool
@@ -143,7 +144,7 @@ def test_real_sandbox_toolnode_transports_success_and_path_failure(monkeypatch, 
 
 
 def test_memory_toolnode_failure_transports_stable_outcome(monkeypatch, tmp_path):
-    """没有 trusted Memory intent 时，真实 ToolNode 保留 stable error_type 而不终止 graph。"""
+    """没有 trusted Memory intent 时保留 stable outcome，并按既有 SAFETY_BLOCKED 映射终止。"""
     async def scenario() -> None:
         model = _SequentialModel([
             _tool_call("save_user_profile", {"new_content": "PROFILE_PRIVATE"}, "memory-call"),
@@ -153,10 +154,10 @@ def test_memory_toolnode_failure_transports_stable_outcome(monkeypatch, tmp_path
         monkeypatch.setattr(builtins, "MEMORY_DIR", str(tmp_path / "memory"))
         with patch.object(agent_graph, "get_provider", return_value=model):
             graph = agent_graph.create_agent_app(tools=[builtins.save_user_profile])
-        state = await graph.ainvoke({"messages": [HumanMessage(content="ordinary turn")], "summary": ""})
-        tool_message = next(message for message in state["messages"] if isinstance(message, ToolMessage))
-        assert extract_tool_outcome(tool_message) == StructuredToolOutcome(False, "memory_write_not_eligible")
-        assert state["messages"][-1].content == "memory failure handled"
+        with pytest.raises(AgentToolFailure) as error:
+            await graph.ainvoke({"messages": [HumanMessage(content="ordinary turn")], "summary": ""})
+        assert error.value.failure.code.value == "safety_blocked"
+        assert len(model.inputs) == 1
         assert not (tmp_path / "memory").exists()
 
     asyncio.run(scenario())

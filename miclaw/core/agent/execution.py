@@ -68,6 +68,16 @@ class AgentProviderFailure(RuntimeError):
         super().__init__(failure.code.value)
 
 
+class AgentToolFailure(RuntimeError):
+    """把 post-ToolNode 已分类的 terminal Tool failure 传递给 execution wrapper。"""
+
+    def __init__(self, failure: ExecutionFailure) -> None:
+        if type(failure) is not ExecutionFailure or failure.source is not ExecutionFailureSource.TOOL:
+            raise AgentExecutionRuntimeError("invalid_tool_failure")
+        self.failure = failure
+        super().__init__(failure.code.value)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentExecutionResult:
     """单次 Agent invocation 的内存执行结果，不记录原始异常。"""
@@ -189,6 +199,8 @@ async def run_agent_execution(
             failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.EXECUTION_LIMIT_EXCEEDED)
         except ExecutionGuardTriggered:
             failure = ExecutionFailure(ExecutionFailureSource.RUNTIME, ExecutionFailureCode.LOOP_GUARD_TRIGGERED)
+        except AgentToolFailure as exc:
+            failure = exc.failure
         except AgentProviderFailure as exc:
             failure = exc.failure
         except Exception:

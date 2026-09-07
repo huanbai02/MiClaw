@@ -731,8 +731,8 @@ def test_normal_entry_turn_cannot_self_authorize_memory_write(runtime_main, monk
     )
 
     assert not (memory_dir / "user_profile.md").exists()
-    assert "Memory write is not eligible" in _model_contents(model)
-    assert tool_error_types == ["memory_write_not_eligible"]
+    assert len(model.inputs) == 1
+    assert tool_error_types == []
     assert get_memory_write_intent() is None
 
 
@@ -753,8 +753,8 @@ def test_remember_intent_does_not_leak_to_next_turn(runtime_main, monkeypatch, t
     )
 
     assert (memory_dir / "user_profile.md").read_text(encoding="utf-8") == "FIRST_PROFILE"
-    assert "Memory write is not eligible" in _model_contents(model)
-    assert tool_error_types == ["memory_write_not_eligible"]
+    assert len(model.inputs) == 3
+    assert tool_error_types == []
     assert get_memory_write_intent() is None
 
 
@@ -774,8 +774,8 @@ def test_remember_failure_cleanup_does_not_grant_next_turn(runtime_main, monkeyp
     )
 
     assert not (memory_dir / "user_profile.md").exists()
-    assert "Memory write is not eligible" in _model_contents(model)
-    assert tool_error_types == ["memory_write_not_eligible"]
+    assert len(model.inputs) == 2
+    assert tool_error_types == []
     assert get_memory_write_intent() is None
 
 
@@ -794,8 +794,8 @@ def test_scheduler_request_cannot_gain_remember_intent(runtime_main, monkeypatch
 
     assert scheduled_request.memory_write_intent is None
     assert not (memory_dir / "user_profile.md").exists()
-    assert "Memory write is not eligible" in _model_contents(model)
-    assert tool_error_types == ["memory_write_not_eligible"]
+    assert len(model.inputs) == 1
+    assert tool_error_types == []
     assert get_memory_write_intent() is None
 
 

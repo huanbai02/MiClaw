@@ -2,10 +2,13 @@ from typing import List, Optional
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from .context import AgentState, trim_context_messages
 from ..llm.provider import get_provider
 from ..tools.builtins import BUILTIN_TOOLS
+from ..tools.result import extract_tool_outcome
+from ..execution.failures import ExecutionFailure, classify_tool_error_type
+from ..execution.tool_failures import select_terminal_tool_failure
 from ..observability.logger import audit_logger
 from ..observability.redaction import summarize_content, summarize_tool_args
 from ..runtime.config import MEMORY_DIR
@@ -17,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import ANSI
 
-from .execution import invoke_provider, preflight_tool_call_batch
+from .execution import AgentToolFailure, AgentExecutionRuntimeError, invoke_provider, preflight_tool_call_batch
 
 
 BASE_SYSTEM_PROMPT = (
@@ -72,6 +75,29 @@ def _context_assembly_event_fields(
         "historical_context_framed": result.historical_context_framed,
         "escaped_marker_count": result.escaped_marker_count,
     }
+
+
+def _latest_tool_failures(messages: list[object]) -> list[ExecutionFailure]:
+    """只从刚完成的 trailing ToolMessage batch 提取已结构化、失败的 Tool outcome。"""
+    trailing: list[ToolMessage] = []
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        trailing.append(message)
+    failures: list[ExecutionFailure] = []
+    for message in reversed(trailing):
+        outcome = extract_tool_outcome(message)
+        if outcome is None or outcome.ok:
+            continue
+        failures.append(classify_tool_error_type(
+            outcome.error_type if type(outcome.error_type) is str else ""
+        ))
+    return failures
+
+
+def _terminal_tool_failure(messages: list[object]) -> ExecutionFailure | None:
+    """为当前 ToolNode batch 选择唯一 terminal failure，不扫描历史 ToolMessage。"""
+    return select_terminal_tool_failure(_latest_tool_failures(messages))
 
 def create_agent_app(
     provider_name: str = "openai",
@@ -209,11 +235,23 @@ def create_agent_app(
 
         return state_updates
 
+    def route_after_tools(state: AgentState) -> str:
+        """只有 terminal structured Tool failure 才阻止下一轮模型调用。"""
+        return "tool_failure_boundary" if _terminal_tool_failure(state["messages"]) is not None else "agent"
+
+    def tool_failure_boundary(state: AgentState) -> dict:
+        """纯 failure boundary：不执行 Tool/模型/持久化，只向 wrapper 传递 typed failure。"""
+        failure = _terminal_tool_failure(state["messages"])
+        if failure is None:
+            raise AgentExecutionRuntimeError("missing_terminal_tool_failure")
+        raise AgentToolFailure(failure)
+
     workflow = StateGraph(AgentState)
 
 
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", tool_node)
+    workflow.add_node("tool_failure_boundary", tool_failure_boundary)
 
 
     workflow.add_edge(START, "agent")
@@ -222,7 +260,11 @@ def create_agent_app(
     # tools_condition 会自动判断：有指令 -> 走向 "tools" 节点；没指令 -> 走向 END。
     workflow.add_conditional_edges("agent", tools_condition)
 
-    workflow.add_edge("tools", "agent")
+    workflow.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {"agent": "agent", "tool_failure_boundary": "tool_failure_boundary"},
+    )
 
     app = workflow.compile(checkpointer=checkpointer)
 
