@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import sqlite3
+from collections import Counter
 from datetime import datetime, timedelta
 import sys
 from contextlib import nullcontext
@@ -14,7 +15,10 @@ import entry
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from miclaw.core.agent.request import AgentRequest, AgentRequestOrigin
+import miclaw.core.agent.execution as execution_module
 import miclaw.core.agent.graph as agent_graph
+from miclaw.core.execution.models import ExecutionStatus, is_terminal
+import miclaw.core.scheduler.heartbeat as heartbeat
 import miclaw.core.memory.permissions as memory_permissions
 from miclaw.core.memory.lifecycle import MemoryWriteIntent, get_memory_write_intent
 from miclaw.core.memory.user_profile import UserProfileStore
@@ -27,8 +31,10 @@ from miclaw.core.security.permissions import (
     set_session_permission_grants,
 )
 from miclaw.core.tools import builtins
-from miclaw.core.tools.result import extract_tool_outcome
+import miclaw.core.tools.sandbox as sandbox_tools
+from miclaw.core.tools.result import StructuredToolOutcome, extract_tool_outcome
 from miclaw.core.observability.trace import TraceContext
+from miclaw.core.runtime.workspace import reset_active_project_root, set_active_project_root
 
 
 class _TrackingQueue(asyncio.Queue):
@@ -52,6 +58,34 @@ class _TrackingQueue(asyncio.Queue):
             raise
         self.get_items.append(item)
         return item
+
+
+async def _wait_for_durable_status_counts(
+    execution_db,
+    expected: dict[ExecutionStatus, int],
+    *,
+    timeout: float = 1.0,
+):
+    """轮询 authoritative ExecutionStore，直到全部 logical execution 都处于预期 terminal 状态。"""
+    from miclaw.core.runtime.execution_store import ExecutionStore, ExecutionStoreError
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    observed: Counter[ExecutionStatus] = Counter()
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            store = ExecutionStore(execution_db, readonly=True)
+        except ExecutionStoreError:
+            await asyncio.sleep(0.005)
+            continue
+        try:
+            records = store.list_latest_attempts(limit=100)
+        finally:
+            store.close()
+        observed = Counter(record.state.status for record in records)
+        if observed == Counter(expected) and all(is_terminal(status) for status in observed):
+            return records
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"durable execution states did not converge: {dict(observed)}")
 
 
 @pytest.fixture
@@ -649,7 +683,7 @@ def _run_memory_entry(
             return next(prompt_values)
 
     class _NoopLogger:
-        def log_event(self, **_kwargs) -> None:
+        def log_event(self, *_args, **_kwargs) -> None:
             pass
 
     async def fake_pacemaker_loop(task_queue, check_interval: int = 10):
@@ -763,15 +797,11 @@ def test_scheduler_requests_isolate_session_grants_and_restore_interactive_conte
                 await scheduled_failure_done.wait()
                 return "interactive four"
             await interactive_fourth_done.wait()
-            for _ in range(100):
-                with sqlite3.connect(execution_db) as connection:
-                    statuses = connection.execute(
-                        "SELECT status FROM execution_attempts ORDER BY created_at"
-                    ).fetchall()
-                if statuses and statuses[-1] == ("succeeded",):
-                    return "/exit"
-                await asyncio.sleep(0.01)
-            raise AssertionError("final interactive execution did not persist")
+            await _wait_for_durable_status_counts(
+                execution_db,
+                {ExecutionStatus.SUCCEEDED: 5, ExecutionStatus.FAILED: 1},
+            )
+            return "/exit"
 
     async def fake_pacemaker_loop(task_queue, check_interval: int = 10):
         await first_confirmation.wait()
@@ -808,7 +838,7 @@ def test_scheduler_requests_isolate_session_grants_and_restore_interactive_conte
         return PermissionConfirmationChoice.DENY
 
     class _NoopLogger:
-        def log_event(self, **_kwargs) -> None:
+        def log_event(self, *_args, **_kwargs) -> None:
             pass
 
     interactive_grants_token = set_session_permission_grants()
@@ -847,15 +877,288 @@ def test_scheduler_requests_isolate_session_grants_and_restore_interactive_conte
     assert len({id(grants) for grants in confirmation_contexts}) == 4
     assert len(interactive_grants) == 1
     with sqlite3.connect(execution_db) as connection:
-        statuses = connection.execute("SELECT status FROM execution_attempts ORDER BY created_at").fetchall()
-    assert statuses == [
-        ("succeeded",),
-        ("succeeded",),
-        ("succeeded",),
-        ("succeeded",),
-        ("failed",),
-        ("succeeded",),
-    ], statuses
+        statuses = Counter(
+            ExecutionStatus(status)
+            for (status,) in connection.execute("SELECT status FROM execution_attempts")
+        )
+    assert statuses == Counter({ExecutionStatus.SUCCEEDED: 5, ExecutionStatus.FAILED: 1})
+
+
+@pytest.mark.parametrize(
+    ("permission", "expected_outcome", "expected_file"),
+    [
+        (PermissionConfirmationChoice.ALLOW_ONCE, StructuredToolOutcome(True, None), "allowed"),
+        (PermissionConfirmationChoice.DENY, StructuredToolOutcome(False, "permission_denied"), None),
+    ],
+)
+def test_project_write_runs_through_entry_agent_toolnode_and_permission(
+    runtime_main,
+    monkeypatch,
+    tmp_path,
+    permission,
+    expected_outcome,
+    expected_file,
+):
+    """PROJECT write 经真实 entry→worker→ToolNode；ALLOW/ DENY 都保留模型继续路径。"""
+    project = tmp_path / "project"
+    project.mkdir()
+    state_db = tmp_path / "state.sqlite3"
+    execution_db = tmp_path / "execution.sqlite3"
+    model_finished = asyncio.Event()
+    confirmations = []
+
+    class _ProjectModel(_SequenceModel):
+        """在最终模型调用时释放 input loop，随后等待 durable terminal state。"""
+
+        def invoke(self, messages):
+            response = super().invoke(messages)
+            if len(self.inputs) == 2:
+                model_finished.set()
+            return response
+
+    model = _ProjectModel([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "write_office_file",
+                "args": {"filepath": "result.txt", "content": "allowed", "mode": "w"},
+                "id": "project-write",
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="project write complete"),
+    ])
+
+    class _PromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "write project file"
+            await model_finished.wait()
+            await _wait_for_durable_status_counts(
+                execution_db, {ExecutionStatus.SUCCEEDED: 1}
+            )
+            return "/exit"
+
+    async def _idle_pacemaker(_queue, check_interval: int = 10) -> None:
+        await asyncio.Event().wait()
+
+    class _NoopLogger:
+        def log_event(self, *_args, **_kwargs) -> None:
+            pass
+
+    project_token = set_active_project_root(project)
+    grants_token = set_session_permission_grants()
+    confirmation_token = set_permission_confirmation_handler(
+        lambda request, _result: confirmations.append(request) or permission
+    )
+    try:
+        monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: _SequenceProvider(model))
+        monkeypatch.setattr(agent_graph, "MEMORY_DIR", str(tmp_path / "memory"))
+        monkeypatch.setattr(agent_graph, "audit_logger", _NoopLogger())
+        monkeypatch.setattr(execution_module, "audit_logger", _NoopLogger())
+        monkeypatch.setattr(sandbox_tools, "_permission_audit_logger", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            sandbox_tools, "_permission_confirmation_audit_logger", lambda *_args, **_kwargs: None
+        )
+        monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+        monkeypatch.setattr(runtime_main, "cprint", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+        monkeypatch.setattr(runtime_main, "PromptSession", _PromptSession)
+        monkeypatch.setattr(runtime_main, "pacemaker_loop", _idle_pacemaker)
+        monkeypatch.setattr(runtime_main, "DB_PATH", str(state_db))
+        monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+        asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="project-entry-toolnode")))
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(grants_token)
+        reset_active_project_root(project_token)
+
+    target = project / "result.txt"
+    tool_message = next(
+        message
+        for message in model.inputs[1]
+        if isinstance(message, ToolMessage) and message.tool_call_id == "project-write"
+    )
+    assert extract_tool_outcome(tool_message) == expected_outcome
+    assert len(model.inputs) == 2
+    assert len(confirmations) == 1
+    assert confirmations[0].metadata["workspace_scope"] == "project"
+    if expected_file is None:
+        assert not target.exists()
+    else:
+        assert target.read_text(encoding="utf-8") == expected_file
+    assert state_db.exists()
+    with sqlite3.connect(state_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] > 0
+
+
+def test_scheduler_full_path_creates_due_task_and_runs_scheduler_execution(runtime_main, monkeypatch, tmp_path):
+    """真实 ToolNode 创建 tasks.json 后，真实 pacemaker 将其投递给同一 worker 并持久化 scheduled turn。"""
+    task_file = tmp_path / "tasks.json"
+    task_file.write_text("[]", encoding="utf-8")
+    state_db = tmp_path / "state.sqlite3"
+    execution_db = tmp_path / "execution.sqlite3"
+    queue = _TrackingQueue()
+    interactive_tool_finished = asyncio.Event()
+    scheduled_tool_finished = asyncio.Event()
+    confirmation_contexts: list[set] = []
+    confirmations = []
+    future_time = (datetime.now() + timedelta(days=1)).replace(microsecond=0)
+
+    class _SchedulerModel(_SequenceModel):
+        """在 interactive ToolNode 成功后仅把真实创建出的 one-shot task 调整为已到期。"""
+
+        def invoke(self, messages):
+            response = super().invoke(messages)
+            if len(self.inputs) == 2:
+                with builtins.tasks_lock:
+                    tasks = json.loads(task_file.read_text(encoding="utf-8"))
+                    assert [task["description"] for task in tasks] == ["closure due task"]
+                    tasks[0]["target_time"] = (datetime.now() - timedelta(minutes=1)).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    task_file.write_text(json.dumps(tasks), encoding="utf-8")
+                interactive_tool_finished.set()
+            elif len(self.inputs) == 4:
+                scheduled_tool_finished.set()
+            return response
+
+    model = _SchedulerModel([
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "schedule_task",
+                "args": {
+                    "target_time": future_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "description": "closure due task",
+                    "repeat": None,
+                    "repeat_count": None,
+                },
+                "id": "interactive-schedule",
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="scheduled"),
+        AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "schedule_task",
+                "args": {
+                    "target_time": future_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "description": "scheduled mutation denied",
+                    "repeat": None,
+                    "repeat_count": None,
+                },
+                "id": "scheduled-denied",
+                "type": "tool_call",
+            }],
+        ),
+        AIMessage(content="scheduled denial explained"),
+    ])
+
+    class _AsyncioProxy:
+        Queue = staticmethod(lambda: queue)
+
+        def __getattr__(self, name: str):
+            return getattr(asyncio, name)
+
+    class _PromptSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.step = 0
+
+        async def prompt_async(self, *_args, **_kwargs) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "create due task"
+            await interactive_tool_finished.wait()
+            await scheduled_tool_finished.wait()
+            await _wait_for_durable_status_counts(
+                execution_db, {ExecutionStatus.SUCCEEDED: 2}
+            )
+            return "/exit"
+
+    observed: dict[str, object] = {}
+
+    async def _fast_real_pacemaker(task_queue, check_interval: int = 10) -> None:
+        observed["heartbeat_queue"] = task_queue
+        await heartbeat.pacemaker_loop(task_queue, check_interval=0.001)
+
+    class _NoopLogger:
+        def log_event(self, *_args, **_kwargs) -> None:
+            pass
+
+    interactive_grants_token = set_session_permission_grants()
+    interactive_grants = get_session_permission_grants()
+
+    def confirm(request, _result):
+        grants = get_session_permission_grants()
+        assert grants is not None
+        confirmations.append(request)
+        confirmation_contexts.append(grants)
+        if len(confirmations) == 1:
+            return PermissionConfirmationChoice.ALLOW_SESSION
+        assert len(confirmations) == 2
+        assert grants == set()
+        return PermissionConfirmationChoice.DENY
+
+    confirmation_token = set_permission_confirmation_handler(confirm)
+    try:
+        monkeypatch.setattr(runtime_main, "asyncio", _AsyncioProxy())
+        monkeypatch.setattr(agent_graph, "get_provider", lambda **_kwargs: _SequenceProvider(model))
+        monkeypatch.setattr(agent_graph, "MEMORY_DIR", str(tmp_path / "memory"))
+        monkeypatch.setattr(agent_graph, "audit_logger", _NoopLogger())
+        monkeypatch.setattr(execution_module, "audit_logger", _NoopLogger())
+        monkeypatch.setattr(builtins, "TASKS_FILE", str(task_file))
+        monkeypatch.setattr(heartbeat, "TASKS_FILE", str(task_file))
+        monkeypatch.setattr(builtins, "_permission_audit_logger", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            builtins, "_permission_confirmation_audit_logger", lambda *_args, **_kwargs: None
+        )
+        monkeypatch.setattr(runtime_main, "print_banner", lambda: None)
+        monkeypatch.setattr(runtime_main, "cprint", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runtime_main, "patch_stdout", lambda: nullcontext())
+        monkeypatch.setattr(runtime_main, "PromptSession", _PromptSession)
+        monkeypatch.setattr(runtime_main, "pacemaker_loop", _fast_real_pacemaker)
+        monkeypatch.setattr(runtime_main, "DB_PATH", str(state_db))
+        monkeypatch.setattr(runtime_main, "EXECUTION_DB_PATH", str(execution_db))
+        asyncio.run(runtime_main.async_main(trace_context=TraceContext(run_id="scheduler-full-path")))
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(interactive_grants_token)
+
+    scheduled_requests = [
+        request
+        for request in queue.put_items
+        if isinstance(request, AgentRequest) and request.origin is AgentRequestOrigin.SCHEDULER
+    ]
+    outcomes = {
+        message.tool_call_id: extract_tool_outcome(message)
+        for batch in model.inputs
+        for message in batch
+        if isinstance(message, ToolMessage)
+    }
+    from miclaw.core.runtime.execution_store import ExecutionStore
+
+    with ExecutionStore(execution_db, readonly=True) as store:
+        records = store.list_latest_attempts(limit=100)
+    assert observed["heartbeat_queue"] is queue
+    assert len(scheduled_requests) == 1
+    assert scheduled_requests[0].memory_write_intent is None
+    assert "closure due task" in scheduled_requests[0].content
+    assert outcomes["interactive-schedule"] == StructuredToolOutcome(True, None)
+    assert outcomes["scheduled-denied"] == StructuredToolOutcome(False, "permission_denied")
+    assert json.loads(task_file.read_text(encoding="utf-8")) == []
+    assert len(confirmations) == 2
+    assert confirmation_contexts[0] is interactive_grants
+    assert confirmation_contexts[1] is not interactive_grants
+    assert len({record.state.execution_id for record in records}) == 2
+    assert Counter(record.state.status for record in records) == Counter({ExecutionStatus.SUCCEEDED: 2})
+    with sqlite3.connect(state_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] > 0
 
 
 def test_scheduler_cancellation_restores_interactive_session_grants(runtime_main, monkeypatch, tmp_path):
