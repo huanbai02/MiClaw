@@ -20,36 +20,42 @@ class ExecutionStoreError(RuntimeError):
 class ExecutionStore:
     """持久化 attempt 元数据，并以 expected-status CAS 镜像领域状态机。"""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, readonly: bool = False) -> None:
         """打开独立 execution SQLite 数据库并初始化 schema。"""
-        if type(path) is not str and not isinstance(path, Path):
+        if (type(path) is not str and not isinstance(path, Path)) or type(readonly) is not bool:
             raise ExecutionStoreError("execution_store_error")
         try:
-            self._connection = sqlite3.connect(str(path))
-            self._connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS execution_attempts (
-                    execution_id TEXT NOT NULL,
-                    attempt INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    run_id TEXT,
-                    started_at TEXT,
-                    finished_at TEXT,
-                    failure_source TEXT,
-                    failure_code TEXT,
-                    retry_decision TEXT,
-                    retry_reason TEXT,
-                    checkpoint_thread_id TEXT,
-                    checkpoint_run_id TEXT,
-                    checkpoint_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (execution_id, attempt)
+            if readonly:
+                database_path = Path(path).expanduser().resolve(strict=True)
+                if not database_path.is_file():
+                    raise OSError
+                self._connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+            else:
+                self._connection = sqlite3.connect(str(path))
+                self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS execution_attempts (
+                        execution_id TEXT NOT NULL,
+                        attempt INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        run_id TEXT,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        failure_source TEXT,
+                        failure_code TEXT,
+                        retry_decision TEXT,
+                        retry_reason TEXT,
+                        checkpoint_thread_id TEXT,
+                        checkpoint_run_id TEXT,
+                        checkpoint_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (execution_id, attempt)
+                    )
+                    """
                 )
-                """
-            )
-            self._connection.commit()
-        except (sqlite3.Error, OSError):
+                self._connection.commit()
+        except (sqlite3.Error, OSError, RuntimeError, ValueError):
             raise ExecutionStoreError("execution_store_error") from None
 
     def close(self) -> None:
@@ -139,6 +145,43 @@ class ExecutionStore:
         if row is None:
             raise ExecutionStoreError("execution_record_not_found")
         return _record_from_row(row)
+
+    def list_latest_attempts(self, *, limit: int) -> list[ExecutionAttemptRecord]:
+        """按更新时间倒序读取每个 logical execution 的最新 attempt。"""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ExecutionStoreError("invalid_execution_record")
+        try:
+            rows = self._connection.execute(
+                "SELECT execution_id, attempt, status, run_id, started_at, finished_at, "
+                "failure_source, failure_code, retry_decision, retry_reason, "
+                "checkpoint_thread_id, checkpoint_run_id, checkpoint_id "
+                "FROM execution_attempts AS current "
+                "WHERE attempt = (SELECT MAX(attempt) FROM execution_attempts "
+                "WHERE execution_id = current.execution_id) "
+                "ORDER BY updated_at DESC, execution_id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.Error:
+            raise ExecutionStoreError("execution_store_error") from None
+        return [_record_from_row(row) for row in rows]
+
+    def list_attempts(self, execution_id: str) -> list[ExecutionAttemptRecord]:
+        """按 attempt 升序读取一个 logical execution 的全部 durable attempts。"""
+        if type(execution_id) is not str or not execution_id.strip():
+            raise ExecutionStoreError("invalid_execution_record")
+        try:
+            rows = self._connection.execute(
+                "SELECT execution_id, attempt, status, run_id, started_at, finished_at, "
+                "failure_source, failure_code, retry_decision, retry_reason, "
+                "checkpoint_thread_id, checkpoint_run_id, checkpoint_id "
+                "FROM execution_attempts WHERE execution_id = ? ORDER BY attempt ASC",
+                (execution_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            raise ExecutionStoreError("execution_store_error") from None
+        if not rows:
+            raise ExecutionStoreError("execution_record_not_found")
+        return [_record_from_row(row) for row in rows]
 
     def _insert(self, record: ExecutionAttemptRecord) -> None:
         """执行不覆盖既有 attempt 的 INSERT。"""

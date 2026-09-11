@@ -70,6 +70,22 @@ miclaw run
 
 运行期间遇到 `ASK` permission 时，CLI 只展示安全摘要，并支持单次允许、当前 session 允许或拒绝；默认值、无效输入或 prompt 异常都会阻断操作。Session grant 仅保存在当前进程内存中，退出本次运行后自动清除。
 
+需要明确保存长期画像时，使用：
+
+```text
+/remember <content>
+```
+
+该命令只为当前 turn 建立可信的写入 eligibility；实际 `MEMORY_WRITE` 仍会经过 permission confirmation。MiClaw 不会从任意自然语言自动提取并持久化记忆。
+
+如需停止当前正在运行的 Agent execution，使用：
+
+```text
+/cancel
+```
+
+`/cancel` 只取消本次 `miclaw run` 进程中的 active execution；持久化成功时其 attempt 会标记为 `CANCELLED`。它不会清空已排队请求、不会取消其他 MiClaw 进程，也不会回滚已经完成的 Tool、MCP、文件或 Memory 副作用。
+
 如需把当前 run 显式限制在一个现有项目目录，可使用：
 
 ```bash
@@ -77,6 +93,53 @@ miclaw run --workspace /path/to/existing/project
 ```
 
 该 PROJECT root 仅在本次运行内有效，不会持久化；未提供时仍使用默认 `workspace/office/`。PROJECT 内的 low-risk 文件读取和列举默认允许，文件写入和 shell 执行仍需 confirmation 或匹配的 session grant。
+
+### MCP stdio
+
+可通过 host 提供的本地 JSON 配置在启动时注册 MCP stdio Tool：
+
+```json
+{
+  "servers": [
+    {
+      "id": "local_demo",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["/path/to/server.py"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+```bash
+miclaw run --mcp-config /path/to/mcp.json
+```
+
+配置由本地 host 控制；模型只能选择已发现的 Tool，不能控制 executable、args、env、cwd 或 server 生命周期。MCP Tool 每次调用仍需 MiClaw permission confirmation。当前仅支持 stdio；修改配置后需重启运行时。
+
+### Execution control
+
+Execution metadata 保存在 runtime workspace 的 `execution.sqlite3`；可查看已持久化 attempts：
+
+```bash
+miclaw execution list
+miclaw execution show <execution_id>
+miclaw execution list --workspace /path/to/runtime-workspace
+```
+
+对明确 attempt 请求 targeted recovery：
+
+```bash
+miclaw execution recover <execution_id> --attempt 1
+miclaw execution resume <execution_id> --attempt 2
+```
+
+`recover` 只会基于同一 workspace 的 checkpoint 进行安全 assessment：已完成图可 reconciliation 为 `SUCCEEDED`；安全的不完整 checkpoint 可能将旧 attempt 标记为 `INTERRUPTED` 并创建新的 `PENDING` attempt。该命令**不会**执行新的 attempt，也不会从 START replay；ToolNode 或缺失 checkpoint 会 fail closed。
+
+`resume` 只接受用户明确指定的既有 `PENDING` attempt，并且必须能证明其 predecessor 的 exact checkpoint 可安全继续。它从该 checkpoint continuation 执行一次；不安全、缺失或 ownership 不匹配的 checkpoint 会拒绝且保持 PENDING。新的 provider timeout 只会按既有策略计划下一个 PENDING attempt，不会自动继续执行；如需 MCP Tool，需再次显式提供当前 host-owned `--mcp-config`。
+
+结构化 Tool failure 会按稳定分类处理：可由模型修正的输入、权限、timeout 或 transient 问题会交回 Agent 继续推理；hard safety block、无效运行时配置和未知结构化错误会结束当前 attempt。Tool timeout/transient 不会自动重试整轮 graph，已完成的 Tool 副作用不会回滚。
 
 查看运行日志监控面板：
 
@@ -126,15 +189,15 @@ miclaw skills lint --help
 - 模型提供商配置：通过配置向导保存默认 Provider、模型名、API Key 和兼容 Base URL。
 - 对话智能体：基于 LangGraph 组织 Agent 循环、工具选择和上下文状态。
 - 沙盒工具：提供 office 目录内的文件列表、读取、写入和 Shell 执行能力。
-- 长期记忆：通过 Markdown 档案维护用户画像，支持在对话中主动更新。
+- 长期记忆：通过 Markdown 档案维护用户画像；使用 `/remember <content>` 显式请求更新，且仍需 permission confirmation。
 - 定时任务：后台心跳循环检查 `tasks.json`，到点后把任务投递给智能体处理。
-- 技能加载：从 `SKILL.md` 动态加载工具说明，支持懒加载和缓存刷新。
+  创建、修改和删除定时任务会请求 MiClaw permission confirmation；列表读取为低风险操作。interactive 的 `ALLOW_SESSION` 仅复用于 interactive 请求；每个到期任务使用独立 permission-session grants，并重新检查文件、Shell、MCP 和 Memory 权限。
+  当前仍是基础 `tasks.json` heartbeat，不包含 Scheduler 2.0 的任务 execution identity、暂停、自动 retry 或 recovery。
+- 技能加载：启动时从 `SKILL.md` 发现动态工具，调用时懒加载内容；修改 Skill 后需重启运行时以更新 Agent Tool 注册。
 - 监控面板：读取 JSONL 事件日志并实时渲染模型输入、工具调用和输出状态。
 - 日志 tail：通过 `miclaw logs --tail` 安全查看最近 JSONL 事件摘要。
 - Trace 查看：通过 `miclaw trace <run_id>` 查看指定运行的安全事件摘要。
 - Execution Runtime：顶层 Agent 调用具备受限 attempt 状态、循环保护、持久化 metadata 与定向安全恢复；不自动重放图或 Tool。
-
-Phase 5 — Task Execution & Recovery ✅。详见 [`docs/phase5_execution_runtime.md`](docs/phase5_execution_runtime.md)。
 
 ## 项目结构
 

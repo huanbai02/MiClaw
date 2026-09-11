@@ -47,6 +47,10 @@ def secret_result(value: str) -> str:
 @server.tool()
 def side_effect_marker(path: str, value: str = "called") -> str:
     """向测试 marker 追加一行，用于证明 permission ordering。"""
+    call_count_file = os.environ.get("MCP_TEST_CALL_COUNT_FILE")
+    if call_count_file:
+        with Path(call_count_file).open("a", encoding="utf-8") as file:
+            file.write("1\n")
     marker = Path(path)
     marker.parent.mkdir(parents=True, exist_ok=True)
     with marker.open("a", encoding="utf-8") as file:

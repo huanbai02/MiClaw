@@ -9,7 +9,6 @@ from pathlib import Path, PureWindowsPath
 from .base import miclaw_tool
 from .result import (
     ToolResult,
-    format_tool_result_for_model,
     tool_error,
     tool_permission_blocked,
     tool_success,
@@ -158,9 +157,9 @@ def _relative_office_target(path: Path) -> str:
     return _relative_workspace_target(path, _get_active_workspace_root())
 
 
-def _format_result(result: ToolResult) -> str:
-    """统一把内部 ToolResult 转成 model-facing string。"""
-    return format_tool_result_for_model(result)
+def _format_result(result: ToolResult) -> ToolResult:
+    """保留 ToolResult 至统一 decorator，将安全文本与 runtime artifact 一并生成。"""
+    return result
 
 
 def _tool_metadata(tool_name: str, operation: str, target: str, **extra) -> dict:

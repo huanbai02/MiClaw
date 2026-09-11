@@ -15,6 +15,8 @@ langchain-core>=0.2.0
 langgraph>=0.1.0
 langchain>=0.2.0
 langchain-openai>=0.1.0
+langchain-anthropic>=1.0,<1.4
+langchain-ollama>=1,<2
 
 # LLM 提供商 SDK
 openai>=1.0.0

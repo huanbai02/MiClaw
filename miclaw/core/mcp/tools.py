@@ -10,14 +10,19 @@ from contextlib import AsyncExitStack
 import hashlib
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.runnables import ensure_config
 from langchain_core.tools import BaseTool
 
 from .adapter import MCPToolDescriptor
 from .client import MCPStdioClient, MCPStdioServerConfig
-from ..tools.result import format_tool_result_for_model, tool_error
+from ..tools.result import (
+    apply_tool_outcome_status,
+    encode_tool_outcome,
+    format_tool_result_for_model,
+    tool_error,
+)
 
 
 MAX_AGENT_TOOL_NAME_LENGTH = 64
@@ -39,14 +44,22 @@ class MCPAgentTool(BaseTool):
     client: MCPStdioClient
     descriptor: MCPToolDescriptor
     args_schema: dict[str, Any]
+    response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
 
-    def _run(self, **_arguments: object) -> str:
+    def run(self, *args: object, **kwargs: object) -> object:
+        """同步 ToolCall 仍 fail-closed，并对齐返回 ToolMessage status。"""
+        return apply_tool_outcome_status(super().run(*args, **kwargs))
+
+    async def arun(self, *args: object, **kwargs: object) -> object:
+        """异步 MCP ToolCall 返回的 status 与 MiClaw artifact 一致。"""
+        return apply_tool_outcome_status(await super().arun(*args, **kwargs))
+
+    def _run(self, **_arguments: object) -> tuple[str, dict[str, object]]:
         """同步 graph 不跨 event loop 调用 MCP，返回稳定 fail-closed 结果。"""
-        return format_tool_result_for_model(
-            tool_error("mcp_async_required", "MCP tools require async agent execution")
-        )
+        result = tool_error("mcp_async_required", "MCP tools require async agent execution")
+        return format_tool_result_for_model(result), encode_tool_outcome(result)
 
-    async def _arun(self, **arguments: object) -> str:
+    async def _arun(self, **arguments: object) -> tuple[str, dict[str, object]]:
         """通过 PR30 执行，并把 agent thread_id 传给 permission audit。"""
         config = ensure_config()
         thread_id = str(config.get("configurable", {}).get("thread_id") or "system")
@@ -55,7 +68,7 @@ class MCPAgentTool(BaseTool):
             arguments,
             thread_id=thread_id,
         )
-        return format_tool_result_for_model(result)
+        return format_tool_result_for_model(result), encode_tool_outcome(result)
 
 
 def mcp_agent_tool_name(descriptor: MCPToolDescriptor) -> str:

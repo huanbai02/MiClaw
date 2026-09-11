@@ -1,4 +1,5 @@
 import os
+import asyncio
 import typer
 import questionary
 import logging
@@ -34,7 +35,9 @@ if PROJECT_ROOT not in sys.path:
 
 app = typer.Typer(help="MiClaw - 极客专属的赛博智能终端")
 skills_app = typer.Typer(help="查看当前 workspace 中发现的 Skill。", no_args_is_help=True)
+execution_app = typer.Typer(help="查看 execution attempt，并显式请求 targeted recovery。", no_args_is_help=True)
 app.add_typer(skills_app, name="skills")
+app.add_typer(execution_app, name="execution")
 console = Console()
 
 miclaw_style = questionary.Style([
@@ -48,6 +51,274 @@ miclaw_style = questionary.Style([
 ])
 
 ENV_PATH = os.path.join(PROJECT_ROOT, ".env")
+
+
+def _execution_paths(workspace: str | None) -> tuple[Path, Path]:
+    """解析 execution control 使用的同一 runtime workspace 内两份 SQLite 状态。"""
+    try:
+        root = (
+            Path(workspace).expanduser().resolve(strict=True)
+            if workspace is not None
+            else Path(os.getenv("MICLAW_WORKSPACE", os.path.join(PROJECT_ROOT, "workspace"))).expanduser().resolve()
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _execution_cli_error("invalid_workspace")
+    if not root.is_dir():
+        _execution_cli_error("invalid_workspace")
+    return root / "execution.sqlite3", root / "state.sqlite3"
+
+
+def _execution_cli_error(code: str) -> None:
+    """输出不含路径、SQL 或 checkpoint detail 的稳定 execution control 错误。"""
+    console.print(code, markup=False)
+    raise typer.Exit(code=2)
+
+
+def _validate_execution_cli_id(execution_id: str) -> None:
+    """在 Store 前拒绝空白 execution identity，保持 exact-match control surface。"""
+    if type(execution_id) is not str or not execution_id.strip():
+        _execution_cli_error("invalid_execution_id")
+
+
+def _open_execution_store_readonly(path: Path):
+    """以只读 Store 打开已有 execution DB；缺失数据库不触发 SQLite 创建。"""
+    from miclaw.core.runtime.execution_store import ExecutionStore, ExecutionStoreError
+
+    if not path.is_file():
+        return None
+    try:
+        return ExecutionStore(path, readonly=True)
+    except ExecutionStoreError as exc:
+        _execution_cli_error(str(exc))
+
+
+def _safe_time(value: object) -> str:
+    """只渲染领域 state 已验证的时间字段。"""
+    return value.isoformat() if value is not None else "-"
+
+
+def _safe_failure(record: object) -> str:
+    """从稳定 ExecutionAttemptRecord 读取 failure code，不暴露异常 detail。"""
+    failure = getattr(record, "failure", None)
+    return failure.code.value if failure is not None else "-"
+
+
+def _safe_retry(record: object) -> str:
+    """从稳定 ExecutionAttemptRecord 读取 retry decision，不暗示自动执行。"""
+    evaluation = getattr(record, "retry_evaluation", None)
+    return evaluation.decision.value if evaluation is not None else "-"
+
+
+@execution_app.command("list")
+def execution_list(
+    workspace: Annotated[Optional[str], typer.Option(help="指定包含 execution.sqlite3 的 runtime workspace。")] = None,
+    limit: Annotated[int, typer.Option(help="最多显示的 logical execution 数量（1-100）。")] = 20,
+):
+    """列出每个 logical execution 的最新 attempt；该命令只读。"""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        _execution_cli_error("invalid_limit")
+    execution_path, _ = _execution_paths(workspace)
+    store = _open_execution_store_readonly(execution_path)
+    if store is None:
+        console.print("No executions found.", markup=False)
+        return
+    try:
+        records = store.list_latest_attempts(limit=limit)
+    except Exception as exc:
+        _execution_cli_error(str(exc) if str(exc) in {"execution_store_error", "invalid_execution_record"} else "execution_store_error")
+    finally:
+        store.close()
+    if not records:
+        console.print("No executions found.", markup=False)
+        return
+    for record in records:
+        state = record.state
+        console.print(
+            f"{state.execution_id} attempt={state.attempt} status={state.status.value} "
+            f"failure={_safe_failure(record)} retry={_safe_retry(record)} finished={_safe_time(state.finished_at)}",
+            markup=False,
+        )
+
+
+@execution_app.command("show")
+def execution_show(
+    execution_id: str,
+    workspace: Annotated[Optional[str], typer.Option(help="指定包含 execution.sqlite3 的 runtime workspace。")] = None,
+):
+    """展示一个 logical execution 的全部 attempts；该命令只读。"""
+    _validate_execution_cli_id(execution_id)
+    execution_path, _ = _execution_paths(workspace)
+    store = _open_execution_store_readonly(execution_path)
+    if store is None:
+        _execution_cli_error("execution_not_found")
+    try:
+        records = store.list_attempts(execution_id)
+    except Exception as exc:
+        _execution_cli_error("execution_not_found" if str(exc) == "execution_record_not_found" else "execution_store_error")
+    finally:
+        store.close()
+    console.print(f"Execution: {execution_id}", markup=False)
+    for record in records:
+        state = record.state
+        evaluation = record.retry_evaluation
+        console.print(
+            f"attempt={state.attempt} status={state.status.value} started={_safe_time(state.started_at)} "
+            f"finished={_safe_time(state.finished_at)} failure={_safe_failure(record)} retry={_safe_retry(record)} "
+            f"retry_reason={evaluation.reason.value if evaluation is not None else '-'}",
+            markup=False,
+        )
+
+
+@execution_app.command("recover")
+def execution_recover(
+    execution_id: str,
+    attempt: Annotated[int, typer.Option("--attempt", help="要恢复的明确 attempt（>=1）。")],
+    workspace: Annotated[Optional[str], typer.Option(help="指定同时包含 execution.sqlite3/state.sqlite3 的 runtime workspace。")] = None,
+):
+    """对单个 attempt 执行 checkpoint assessment/reconciliation/planning，绝不执行 graph continuation。"""
+    _validate_execution_cli_id(execution_id)
+    if type(attempt) is not int or attempt < 1:
+        _execution_cli_error("invalid_attempt")
+    execution_path, state_path = _execution_paths(workspace)
+    if not execution_path.is_file() or not state_path.is_file():
+        _execution_cli_error("recovery_not_available")
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from miclaw.core.agent.graph import create_agent_app
+    from miclaw.core.agent.recovery import AgentRecoveryError, recover_execution
+    from miclaw.core.runtime.execution_store import ExecutionStore, ExecutionStoreError
+
+    async def recover_once():
+        store = ExecutionStore(execution_path)
+        try:
+            async with AsyncSqliteSaver.from_conn_string(str(state_path)) as checkpointer:
+                graph = create_agent_app(
+                    provider_name=os.getenv("DEFAULT_PROVIDER", "aliyun"),
+                    model_name=os.getenv("DEFAULT_MODEL", "glm-5"),
+                    tools=[],
+                    checkpointer=checkpointer,
+                )
+                return await recover_execution(store, graph, execution_id, attempt)
+        finally:
+            store.close()
+
+    try:
+        result = asyncio.run(recover_once())
+    except AgentRecoveryError as exc:
+        _execution_cli_error("execution_not_found" if str(exc) == "execution_record_not_found" else "recovery_not_available")
+    except ExecutionStoreError as exc:
+        _execution_cli_error("execution_not_found" if str(exc) == "execution_record_not_found" else "execution_store_error")
+    except Exception:
+        _execution_cli_error("recovery_not_available")
+
+    record = result.record.state
+    console.print(f"Recovery decision: {result.assessment.decision.value}", markup=False)
+    console.print(f"Recovery reason: {result.assessment.reason.value}", markup=False)
+    console.print(f"Attempt {record.attempt}: {record.status.value}", markup=False)
+    if result.resume_record is not None:
+        console.print("Recovery planned.", markup=False)
+        console.print(f"Attempt {result.resume_record.state.attempt}: pending", markup=False)
+        console.print("Attempt has not been executed.", markup=False)
+    if result.assessment.decision.value == "do_not_resume":
+        raise typer.Exit(code=2)
+
+
+@execution_app.command("resume")
+def execution_resume(
+    execution_id: str,
+    attempt: Annotated[int, typer.Option("--attempt", help="要执行的明确 PENDING attempt（>=1）。")],
+    workspace: Annotated[Optional[str], typer.Option(help="指定同时包含 execution.sqlite3/state.sqlite3 的 runtime workspace。")] = None,
+    mcp_config: Annotated[
+        Optional[str],
+        typer.Option("--mcp-config", help="指定 host 控制的本地 MCP stdio JSON 配置文件。"),
+    ] = None,
+):
+    """从 predecessor 的 exact safe checkpoint 执行一个既有 PENDING attempt。"""
+    _validate_execution_cli_id(execution_id)
+    if type(attempt) is not int or attempt < 1:
+        _execution_cli_error("invalid_attempt")
+    execution_path, state_path = _execution_paths(workspace)
+    if not execution_path.is_file() or not state_path.is_file():
+        _execution_cli_error("recovery_not_available")
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from miclaw.core.agent.execution import apply_graph_recursion_limit
+    from miclaw.core.agent.graph import create_agent_app, default_agent_tools
+    from miclaw.core.agent.recovery import AgentRecoveryError, resume_pending_execution
+    from miclaw.core.execution.models import ExecutionStatus
+    from miclaw.core.mcp.client import MCPClientError
+    from miclaw.core.mcp.runtime_config import MCPRuntimeConfigError, load_mcp_stdio_configs
+    from miclaw.core.mcp.tools import MCPAgentToolRuntime, MCPToolRegistrationError
+    from miclaw.core.observability.trace import TraceContext, new_run_id
+    from miclaw.core.runtime.execution_store import ExecutionStore, ExecutionStoreError
+
+    load_dotenv(ENV_PATH)
+
+    async def resume_once():
+        store = ExecutionStore(execution_path)
+        mcp_runtime: MCPAgentToolRuntime | None = None
+        try:
+            if store.get_attempt(execution_id, attempt).state.status is not ExecutionStatus.PENDING:
+                raise AgentRecoveryError("execution_attempt_not_pending")
+            try:
+                mcp_configs = load_mcp_stdio_configs(mcp_config)
+            except MCPRuntimeConfigError:
+                raise AgentRecoveryError("invalid_mcp_config") from None
+            mcp_runtime = MCPAgentToolRuntime(mcp_configs, local_tools=default_agent_tools())
+            try:
+                await mcp_runtime.__aenter__()
+            except (MCPClientError, MCPToolRegistrationError, ValueError):
+                raise AgentRecoveryError("mcp_runtime_start_failed") from None
+            async with AsyncSqliteSaver.from_conn_string(str(state_path)) as checkpointer:
+                graph = create_agent_app(
+                    provider_name=os.getenv("DEFAULT_PROVIDER", "aliyun"),
+                    model_name=os.getenv("DEFAULT_MODEL", "glm-5"),
+                    tools=mcp_runtime.tools,
+                    checkpointer=checkpointer,
+                )
+                return await resume_pending_execution(
+                    store,
+                    graph,
+                    execution_id,
+                    attempt,
+                    config=apply_graph_recursion_limit({"configurable": {"thread_id": "local_geek_master"}}),
+                    trace_context=TraceContext(run_id=new_run_id()),
+                )
+        finally:
+            if mcp_runtime is not None:
+                try:
+                    await mcp_runtime.__aexit__(None, None, None)
+                except MCPClientError:
+                    raise AgentRecoveryError("mcp_runtime_shutdown_failed") from None
+            store.close()
+
+    grants_token = set_session_permission_grants()
+    confirmation_token = set_permission_confirmation_handler(cli_permission_confirmation_handler)
+    try:
+        result = asyncio.run(resume_once())
+    except AgentRecoveryError as exc:
+        code = str(exc)
+        if code == "execution_attempt_not_pending":
+            _execution_cli_error(code)
+        if code == "invalid_mcp_config":
+            _execution_cli_error(code)
+        _execution_cli_error("resume_not_available")
+    except ExecutionStoreError as exc:
+        _execution_cli_error("execution_not_found" if str(exc) == "execution_record_not_found" else "execution_store_error")
+    except Exception:
+        _execution_cli_error("resume_not_available")
+    finally:
+        reset_permission_confirmation_handler(confirmation_token)
+        reset_session_permission_grants(grants_token)
+
+    if result.execution is None:
+        console.print(f"Resume refused: {result.assessment.reason.value}", markup=False)
+        raise typer.Exit(code=2)
+    state = result.record.state
+    console.print(f"Attempt {state.attempt} resumed and completed: {state.status.value}", markup=False)
+    if result.execution.next_attempt is not None:
+        console.print(f"Next attempt {result.execution.next_attempt.attempt} planned: pending", markup=False)
+        console.print("Attempt has not been executed.", markup=False)
 
 @app.command("config")
 def config_wizard():
@@ -284,6 +555,10 @@ def run_agent(
         Optional[str],
         typer.Option(help="显式指定当前 run 使用的现有 PROJECT workspace directory。"),
     ] = None,
+    mcp_config: Annotated[
+        Optional[str],
+        typer.Option("--mcp-config", help="指定 host 控制的本地 MCP stdio JSON 配置文件。"),
+    ] = None,
 ):
     load_dotenv(ENV_PATH)
     provider = os.getenv("DEFAULT_PROVIDER")
@@ -315,7 +590,10 @@ def run_agent(
     try:
         import entry.main as miclaw_main
 
-        miclaw_main.main()
+        if mcp_config is None:
+            miclaw_main.main()
+        else:
+            miclaw_main.main(mcp_config_path=mcp_config)
     finally:
         reset_permission_confirmation_handler(confirmation_token)
         reset_session_permission_grants(grants_token)

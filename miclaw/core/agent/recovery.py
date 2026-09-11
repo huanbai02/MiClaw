@@ -19,6 +19,8 @@ from ..execution.recovery import (
 )
 from ..execution.retry import RetryDecision
 from ..execution.state import create_pending_execution, mark_execution_interrupted, mark_execution_succeeded
+from ..execution.retry import RetryPolicy
+from ..observability.trace import new_run_id
 from ..runtime.execution_store import ExecutionStore, ExecutionStoreError
 
 
@@ -36,6 +38,15 @@ class RecoveryResult:
     assessment: RecoveryAssessment
     record: ExecutionAttemptRecord
     resume_record: ExecutionAttemptRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingResumeResult:
+    """显式消费既有 PENDING attempt 的安全结果，不包含 graph state 或 payload。"""
+
+    assessment: RecoveryAssessment
+    record: ExecutionAttemptRecord
+    execution: object | None = None
 
 
 def new_checkpoint_run_id() -> str:
@@ -166,17 +177,11 @@ async def recover_execution(
             RecoveryAssessment(RecoveryDecision.DO_NOT_RESUME, RecoveryReason.STATUS_NOT_RECOVERABLE), record
         ))
 
-    if recovery_source.checkpoint_thread_id is None or recovery_source.checkpoint_run_id is None:
-        return logged(await _stop_unfinished(store, record, RecoveryReason.NO_MATCHING_CHECKPOINT, clock))
-    checkpoint_ref, next_nodes = await latest_owned_checkpoint(
-        graph,
-        recovery_source.checkpoint_thread_id,
-        recovery_source.checkpoint_run_id,
-    )
-    if checkpoint_ref is None:
-        return logged(await _stop_unfinished(store, record, RecoveryReason.MALFORMED_CHECKPOINT if next_nodes is None else RecoveryReason.NO_MATCHING_CHECKPOINT, clock))
-    if next_nodes == ():
+    assessment = await assess_execution_checkpoint(graph, recovery_source)
+    checkpoint_ref = assessment.checkpoint_ref
+    if assessment.decision is RecoveryDecision.MARK_SUCCEEDED:
         if record.state.status is ExecutionStatus.RUNNING:
+            assert checkpoint_ref is not None
             succeeded = mark_execution_succeeded(record.state, finished_at=clock())
             reconciled = ExecutionAttemptRecord(
                 succeeded,
@@ -189,16 +194,16 @@ async def recover_execution(
             except ExecutionStoreError as exc:
                 raise AgentRecoveryError(str(exc)) from None
             return logged(RecoveryResult(
-                RecoveryAssessment(RecoveryDecision.MARK_SUCCEEDED, RecoveryReason.GRAPH_ALREADY_COMPLETE, checkpoint_ref),
+                assessment,
                 reconciled,
             ))
         return logged(RecoveryResult(
             RecoveryAssessment(RecoveryDecision.DO_NOT_RESUME, RecoveryReason.STATUS_NOT_RECOVERABLE, checkpoint_ref), record
         ))
-    if not all(node in RECOVERY_SAFE_NEXT_NODES for node in next_nodes):
-        return logged(await _stop_unfinished(store, record, RecoveryReason.UNSAFE_NEXT_NODE, clock, checkpoint_ref))
+    if assessment.decision is RecoveryDecision.DO_NOT_RESUME:
+        return logged(await _stop_unfinished(store, record, assessment.reason, clock, checkpoint_ref))
 
-    assessment = RecoveryAssessment(RecoveryDecision.RESUME_FROM_CHECKPOINT, RecoveryReason.SAFE_CHECKPOINT_AVAILABLE, checkpoint_ref)
+    assert checkpoint_ref is not None
     if record.state.status is ExecutionStatus.FAILED:
         assert resume_record is not None
         return logged(RecoveryResult(assessment, record, resume_record))
@@ -217,6 +222,104 @@ async def recover_execution(
     except ExecutionStoreError as exc:
         raise AgentRecoveryError(str(exc)) from None
     return logged(RecoveryResult(assessment, interrupted_record, next_record))
+
+
+async def assess_execution_checkpoint(graph: object, record: ExecutionAttemptRecord) -> RecoveryAssessment:
+    """仅检查 record 的 exact checkpoint lineage 是否可安全续跑，不修改 durable state。"""
+    if type(record) is not ExecutionAttemptRecord:
+        raise AgentRecoveryError("invalid_execution_record")
+    if record.checkpoint_thread_id is None or record.checkpoint_run_id is None:
+        return RecoveryAssessment(RecoveryDecision.DO_NOT_RESUME, RecoveryReason.NO_MATCHING_CHECKPOINT)
+    checkpoint_ref, next_nodes = await latest_owned_checkpoint(
+        graph,
+        record.checkpoint_thread_id,
+        record.checkpoint_run_id,
+    )
+    if checkpoint_ref is None:
+        return RecoveryAssessment(
+            RecoveryDecision.DO_NOT_RESUME,
+            RecoveryReason.MALFORMED_CHECKPOINT if next_nodes is None else RecoveryReason.NO_MATCHING_CHECKPOINT,
+        )
+    if next_nodes == ():
+        return RecoveryAssessment(RecoveryDecision.MARK_SUCCEEDED, RecoveryReason.GRAPH_ALREADY_COMPLETE, checkpoint_ref)
+    if not all(node in RECOVERY_SAFE_NEXT_NODES for node in next_nodes):
+        return RecoveryAssessment(RecoveryDecision.DO_NOT_RESUME, RecoveryReason.UNSAFE_NEXT_NODE, checkpoint_ref)
+    return RecoveryAssessment(RecoveryDecision.RESUME_FROM_CHECKPOINT, RecoveryReason.SAFE_CHECKPOINT_AVAILABLE, checkpoint_ref)
+
+
+async def resume_pending_execution(
+    store: ExecutionStore,
+    graph: object,
+    execution_id: str,
+    attempt: int,
+    *,
+    config: dict[str, object],
+    trace_context: TraceContext | None = None,
+    retry_policy: RetryPolicy | None = None,
+) -> PendingResumeResult:
+    """显式执行已计划的 PENDING attempt；只从 predecessor 的 exact safe checkpoint continuation。"""
+    if type(store) is not ExecutionStore or type(config) is not dict:
+        raise AgentRecoveryError("invalid_execution_resume")
+    try:
+        record = store.get_attempt(execution_id, attempt)
+    except ExecutionStoreError as exc:
+        raise AgentRecoveryError(str(exc)) from None
+    if record.state.status is not ExecutionStatus.PENDING:
+        raise AgentRecoveryError("execution_attempt_not_pending")
+    if attempt <= 1:
+        raise AgentRecoveryError("resume_not_available")
+    try:
+        predecessor = store.get_attempt(execution_id, attempt - 1)
+    except ExecutionStoreError as exc:
+        raise AgentRecoveryError("resume_not_available") from None
+    if predecessor.state.status is ExecutionStatus.FAILED:
+        if predecessor.retry_evaluation is None or predecessor.retry_evaluation.decision is not RetryDecision.RETRY:
+            raise AgentRecoveryError("resume_not_available")
+    elif predecessor.state.status is not ExecutionStatus.INTERRUPTED:
+        raise AgentRecoveryError("resume_not_available")
+
+    assessment = await assess_execution_checkpoint(graph, predecessor)
+    checkpoint_ref = assessment.checkpoint_ref
+    if assessment.decision is not RecoveryDecision.RESUME_FROM_CHECKPOINT:
+        if assessment.decision is RecoveryDecision.MARK_SUCCEEDED:
+            assessment = RecoveryAssessment(RecoveryDecision.DO_NOT_RESUME, assessment.reason, checkpoint_ref)
+        return PendingResumeResult(assessment, record)
+    assert checkpoint_ref is not None
+    if predecessor.checkpoint_id != checkpoint_ref.checkpoint_id:
+        return PendingResumeResult(
+            RecoveryAssessment(RecoveryDecision.DO_NOT_RESUME, RecoveryReason.CHECKPOINT_OWNERSHIP_MISMATCH, checkpoint_ref),
+            record,
+        )
+
+    from .execution import run_agent_execution
+
+    checkpoint_run_id = new_checkpoint_run_id()
+    resume_config = apply_checkpoint_resume_config(config, checkpoint_ref, checkpoint_run_id)
+    active_trace = trace_context if trace_context is not None else TraceContext(run_id=new_run_id())
+
+    async def checkpoint_id_provider() -> str | None:
+        latest, _ = await latest_owned_checkpoint(graph, checkpoint_ref.thread_id, checkpoint_run_id)
+        return latest.checkpoint_id if latest is not None else None
+
+    async def invoke() -> object:
+        return await graph.ainvoke(None, config=resume_config, durability="sync")
+
+    execution = await run_agent_execution(
+        invoke,
+        execution_id=execution_id,
+        pending_state=record.state,
+        retry_policy=retry_policy,
+        trace_context=active_trace,
+        execution_store=store,
+        checkpoint_thread_id=checkpoint_ref.thread_id,
+        checkpoint_run_id=checkpoint_run_id,
+        checkpoint_id_provider=checkpoint_id_provider,
+    )
+    try:
+        durable_record = store.get_attempt(execution_id, attempt)
+    except ExecutionStoreError as exc:
+        raise AgentRecoveryError(str(exc)) from None
+    return PendingResumeResult(assessment, durable_record, execution)
 
 
 def _log_recovery(result: RecoveryResult, trace_context: TraceContext | None) -> RecoveryResult:

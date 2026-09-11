@@ -13,6 +13,11 @@ from miclaw.core.tools.builtins import (
     calculator
 )
 from miclaw.core.runtime.config import MEMORY_DIR, TASKS_FILE
+from miclaw.core.security.permissions import (
+    PermissionConfirmationChoice,
+    reset_permission_confirmation_handler,
+    set_permission_confirmation_handler,
+)
 
 
 class TestBuiltInTools(unittest.TestCase):
@@ -103,6 +108,9 @@ class TestBuiltInTools(unittest.TestCase):
 class TestScheduledTasks(unittest.TestCase):
 
     def setUp(self):
+        self.permission_token = set_permission_confirmation_handler(
+            lambda _request, _result: PermissionConfirmationChoice.ALLOW_ONCE
+        )
         # 创建临时任务文件
         self.temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json')
         self.original_tasks_file = TASKS_FILE
@@ -111,6 +119,7 @@ class TestScheduledTasks(unittest.TestCase):
         miclaw.core.tools.builtins.TASKS_FILE = self.temp_file.name
 
     def tearDown(self):
+        reset_permission_confirmation_handler(self.permission_token)
         # 清理临时文件
         self.temp_file.close()
         if os.path.exists(self.temp_file.name):
@@ -202,6 +211,9 @@ class TestScheduledTasks(unittest.TestCase):
 class TestScheduledTasksWithTasks(unittest.TestCase):
 
     def setUp(self):
+        self.permission_token = set_permission_confirmation_handler(
+            lambda _request, _result: PermissionConfirmationChoice.ALLOW_ONCE
+        )
         self.temp_tasks_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json')
 
         # 设置临时任务文件路径
@@ -239,6 +251,7 @@ class TestScheduledTasksWithTasks(unittest.TestCase):
             json.dump(test_tasks, f, ensure_ascii=False, indent=2)
 
     def tearDown(self):
+        reset_permission_confirmation_handler(self.permission_token)
         # 清理临时文件
         self.temp_tasks_file.close()
         if os.path.exists(self.temp_tasks_file.name):

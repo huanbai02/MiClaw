@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 import miclaw.core.agent.graph as agent
+from miclaw.core.agent.execution import AgentToolFailure
 import miclaw.core.memory.lifecycle as memory_lifecycle
 import miclaw.core.memory.permissions as memory_permissions
 from miclaw.core.memory.models import MemoryKind, MemoryScope, MemoryScopeKind
@@ -337,15 +338,16 @@ def test_agent_tool_call_without_intent_cannot_self_certify_or_prompt_for_permis
         lambda request, _result: confirmations.append(request) or PermissionConfirmationChoice.ALLOW_ONCE
     )
     try:
-        agent.create_agent_app(tools=[builtins.save_user_profile]).invoke(
-            {"messages": [HumanMessage(content="ordinary task")], "summary": ""}
-        )
+        with pytest.raises(AgentToolFailure, match="^safety_blocked"):
+            agent.create_agent_app(tools=[builtins.save_user_profile]).invoke(
+                {"messages": [HumanMessage(content="ordinary task")], "summary": ""}
+            )
     finally:
         reset_permission_confirmation_handler(confirmation_token)
 
     assert confirmations == []
     assert not memory_dir.exists()
-    assert "Memory write is not eligible under current policy." in str(model.inputs[1])
+    assert len(model.inputs) == 1
     assert set(builtins.save_user_profile.args) == {"new_content"}
 
 

@@ -1,12 +1,40 @@
 from typing import Any, Type
-from langchain_core.tools import BaseTool, tool
+from functools import wraps
+
+from langchain_core.tools import BaseTool, StructuredTool
+
+from .result import (
+    ToolResult,
+    apply_tool_outcome_status,
+    encode_tool_outcome,
+    format_tool_result_for_model,
+)
+
+
+class _MiClawStructuredTool(StructuredTool):
+    """仅在 ToolCall 路径为 ToolMessage 对齐 framework status。"""
+
+    def run(self, *args, **kwargs):
+        """保留 direct invoke 的 string 行为，并投影 ToolMessage status。"""
+        return apply_tool_outcome_status(super().run(*args, **kwargs))
+
+    async def arun(self, *args, **kwargs):
+        """异步 ToolNode 路径与同步路径使用同一 outcome status。"""
+        return apply_tool_outcome_status(await super().arun(*args, **kwargs))
 from abc import ABC, abstractmethod
 import asyncio
 from pydantic import BaseModel, Field
 
-# 将 LangChain 原生的 @tool 装饰器重命名并暴露出去。
-# 开发者在使用 miclaw 写简单工具时，只需要加一个装饰器和写好 docstring 即可。
-miclaw_tool = tool
+def miclaw_tool(func):
+    """把 MiClaw ToolResult 映射到官方 content/artifact 通道，保留 legacy string。"""
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        result = func(*args, **kwargs)
+        if isinstance(result, ToolResult):
+            return format_tool_result_for_model(result), encode_tool_outcome(result)
+        return result, None
+
+    return _MiClawStructuredTool.from_function(wrapped, response_format="content_and_artifact")
 
 # 类模式工具（适合复杂场景）
 class MiClawBaseTool(BaseTool, ABC):

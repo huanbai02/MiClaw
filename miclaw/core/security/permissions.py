@@ -19,6 +19,7 @@ _MCP_TOOL_TARGET_PATTERN = re.compile(
     r"^mcp::[A-Za-z0-9][A-Za-z0-9._-]{0,79}::[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
 )
 _MEMORY_PROJECT_TARGET_PATTERN = re.compile(r"^user-profile::([0-9a-f]{24})$")
+_SCHEDULER_TASK_TARGET_PATTERN = re.compile(r"^scheduled-task::[0-9a-f]{24}$")
 
 
 class PermissionCapability(str, Enum):
@@ -31,6 +32,7 @@ class PermissionCapability(str, Enum):
     MCP_TOOL = "mcp_tool"
     MEMORY_READ = "memory_read"
     MEMORY_WRITE = "memory_write"
+    SCHEDULER = "scheduler"
     UNKNOWN = "unknown"
 
 
@@ -196,6 +198,9 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
     if capability in {PermissionCapability.MEMORY_READ, PermissionCapability.MEMORY_WRITE}:
         return _evaluate_memory_permission(safe_request)
 
+    if capability is PermissionCapability.SCHEDULER:
+        return _evaluate_scheduler_permission(safe_request)
+
     if "workspace_scope" in safe_request.metadata:
         workspace_scope = _workspace_scope_from_request(safe_request)
         if workspace_scope is None:
@@ -236,6 +241,23 @@ def evaluate_permission(request: PermissionRequest) -> PermissionResult:
         return ask("MCP tool invocation requires confirmation", RiskLevel.HIGH)
 
     return deny("Unknown capability is denied by default", RiskLevel.HIGH)
+
+
+def _evaluate_scheduler_permission(request: PermissionRequest) -> PermissionResult:
+    """评估 runtime-owned scheduler logical targets，读取低风险、持久化变更必须确认。"""
+    if request.operation == "list":
+        if request.target != "scheduled-tasks" or request.risk_level is not RiskLevel.LOW:
+            return deny("Invalid scheduler list operation is denied", RiskLevel.HIGH)
+        return allow("Low-risk scheduler task list is allowed", request.risk_level)
+    if request.operation == "create":
+        valid_target = request.target == "scheduled-tasks"
+    elif request.operation in {"modify", "delete"}:
+        valid_target = _SCHEDULER_TASK_TARGET_PATTERN.fullmatch(request.target) is not None
+    else:
+        valid_target = False
+    if not valid_target or request.risk_level is not RiskLevel.MEDIUM:
+        return deny("Invalid scheduler mutation operation is denied", RiskLevel.HIGH)
+    return ask("Scheduler task mutation requires confirmation", request.risk_level)
 
 
 def _evaluate_memory_permission(request: PermissionRequest) -> PermissionResult:
